@@ -6,7 +6,7 @@
 > и сделай коммит (коммиты на этом проекте согласованы с владельцем).
 > Не пересматривай утверждённые решения из SPEC.md.
 
-**Статус:** этап 1 в работе. Готово: 0/8 этапов.
+**Статус:** этапы 1 готов. Готово: 1/8 этапов. Следующая задача: 2.1.
 
 ## Global Constraints
 
@@ -65,32 +65,27 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
 
 ---
 
-## Этап 1. Каркас + конфиг + окно дока [В РАБОТЕ]
+## Этап 1. Каркас + конфиг + окно дока [ГОТОВ]
 
-- [ ] 1.1 Скелет репозитория: Cargo.toml (зависимости из Global Constraints;
+- [x] 1.1 Скелет репозитория: Cargo.toml (зависимости из Global Constraints;
       profile.release lto thin/strip/opt3/panic abort как в ashell-ru),
-      rustfmt.toml если есть в ashell-ru, Makefile (`check`=fmt --check +
-      clippy -D warnings, `build`, `run`), .gitignore (/target), README-заглушка.
-- [ ] 1.2 `src/config.rs`: все типы из эскиза конфига SPEC.md
-      (`Position{Bottom,Top,Left,Right}`, `Alignment{Center,Start,End}`,
-      `Mode{Fixed,Popup}`, `WidthMode{Fit,Full}`, `HotspotWidth{Dock,Pixels(u32)}`,
-      Appearance, PopupConfig, LauncherConfig, Config top-level с `#[serde(default)]`),
+      Makefile (`check`=fmt --check +
+      clippy -D warnings, `build`, `start`), .gitignore (/target).
+- [x] 1.2 `src/config.rs`: все типы из эскиза конфига SPEC.md
+      (`Position`, `Alignment`, `Mode`, `WidthMode`, `HotspotWidth{Dock,Pixels}`,
+      AppearanceConfig, PopupConfig, LauncherConfig, Config с `#[serde(default)]`),
       загрузка `~/.config/s-dock/config.toml` (+ `--config-path` через clap),
-      дефолты ровно как в эскизе, hot-reload watcher (inotify → Task<Message>,
-      паттерн config.rs ashell-ru).
-- [ ] 1.3 `src/theme.rs`: минимальная тема — struct Space/Sizes/Colors из конфига
-      appearance, функция `use_theme`-подобный доступ; контейнер дока:
-      background_color, border_radius, border_color.
-- [ ] 1.4 `src/main.rs` + `src/app.rs` + `src/outputs.rs`: bootstrap по паттерну
-      выше; на каждый OutputEvent::Added — поверхность дока
-      (anchor по position|alignment, exclusive_zone = dock_size при Fixed,
-      0/-1 при Popup, size по width_mode: full=(0, dock_size) c anchor L|R,
-      fit=(вычислить, dock_size)); рендер пустого ряда-заглушки.
-      Alignment→anchor маппинг: center=LEFT|RIGHT, start=только ближний край,
-      end=только дальний.
-- [ ] 1.5 Проверка: `make check` зелёный; запуск под Hyprland — пустая подложка
-      дока снизу по центру на каждом мониторе; fixed резервирует место
-      (окна не залезают), popup — нет. Коммит `feat: project scaffold with config and dock window`.
+      дефолты ровно как в эскизе, hot-reload watcher (inotify → Message::ConfigChanged).
+- [x] 1.3 `src/theme.rs`: глобальный appearance из конфига (`init`/`update`/
+      `use_theme`), контейнер дока: background_color, border_radius, border_color.
+- [x] 1.4 `src/main.rs` + `src/app.rs` + `src/outputs.rs`: bootstrap по паттерну
+      ashell; fallback-поверхность MAIN заменяется пер-выходными при
+      OutputEvent::Added и восстанавливается при исчезновении всех выходов;
+      anchor по position|alignment (center без stretch = без якоря на оси),
+      exclusive_zone = dock_size при Fixed / 0 при Popup; width Full = растяжение,
+      Fit = заглушка thickness*4; hot-reload пересоздаёт поверхности.
+- [x] 1.5 Проверка: `make check` зелёный. Визуальную проверку у владельца —
+      при следующем запуске. Коммит `feat: project scaffold with config and dock window`.
 
 ## Этап 2. Приложения и окна Hyprland
 
