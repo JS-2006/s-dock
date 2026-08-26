@@ -403,14 +403,15 @@ pub fn fit_content_size(
     };
 
     let radius_pad = appearance.border_radius as u32 * 2;
-    let box_w = appearance.icon_size * 2; // icon_size * hover_scale, rounded up
+    // Hover scale expands the icon visually (slight macOS-style overlap);
+    // the layout slot stays one icon wide so the dock is compact.
+    let slot = appearance.icon_size + 8;
     let spacing = appearance.spacing as u32;
     let n = children.max(1) as u32;
 
-    // launcher + app buttons + inter-item spacing
     let launcher = u32::from(config.launcher.enabled);
     let items = n + launcher;
-    let row = radius_pad + items * box_w + items.saturating_sub(1) * spacing;
+    let row = radius_pad + items * slot + items.saturating_sub(1) * spacing;
 
     if horizontal {
         (row, thickness + headroom)
