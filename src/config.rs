@@ -137,6 +137,8 @@ pub struct AppearanceConfig {
     pub margin: i32,
     pub spacing: f32,
     pub background_color: hex_color::HexColor,
+    /// Extra transparency multiplier for the dock background/border (0..1).
+    pub opacity: f32,
     pub border_radius: f32,
     pub border_color: hex_color::HexColor,
     pub hover_scale: f32,
@@ -154,6 +156,7 @@ impl Default for AppearanceConfig {
             margin: 6,
             spacing: 8.,
             background_color: default_background_color(),
+            opacity: 1.0,
             border_radius: 18.,
             border_color: default_border_color(),
             hover_scale: 1.3,
@@ -180,7 +183,7 @@ impl Default for PopupConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct LauncherConfig {
     pub enabled: bool,
@@ -189,6 +192,8 @@ pub struct LauncherConfig {
     /// Side of the dock row where the button is placed.
     pub position: LauncherPosition,
     pub text_color: hex_color::HexColor,
+    /// Transparency multiplier for the button label (0..1).
+    pub opacity: f32,
 }
 
 impl Default for LauncherConfig {
@@ -199,6 +204,7 @@ impl Default for LauncherConfig {
             cmd: String::new(),
             position: LauncherPosition::Start,
             text_color: default_launcher_text_color(),
+            opacity: 1.0,
         }
     }
 }

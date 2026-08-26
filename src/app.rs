@@ -75,7 +75,7 @@ impl App {
         let launcher = self.config.launcher.clone();
 
         let launcher_button = launcher.enabled.then(|| {
-            let text_color = color_from_hex(launcher.text_color);
+            let text_color = color_from_hex(launcher.text_color, launcher.opacity);
             button(
                 text(launcher.label)
                     .size(appearance.icon_size as f32)
@@ -114,12 +114,15 @@ impl App {
                 config::WidthMode::Fit => Length::Fill,
             })
             .height(Length::Fixed(appearance.dock_size as f32))
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
             .style(move |theme: &iced::Theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(color_from_hex(
                     appearance.background_color,
+                    appearance.opacity,
                 ))),
                 border: iced::Border {
-                    color: color_from_hex(appearance.border_color),
+                    color: color_from_hex(appearance.border_color, appearance.opacity),
                     width: 1.0,
                     radius: (appearance.border_radius).into(),
                 },
@@ -139,6 +142,11 @@ impl App {
     }
 }
 
-fn color_from_hex(hex: hex_color::HexColor) -> iced::Color {
-    iced::Color::from_rgba8(hex.r, hex.g, hex.b, hex.a as f32 / 255.0)
+fn color_from_hex(hex: hex_color::HexColor, opacity: f32) -> iced::Color {
+    iced::Color::from_rgba8(
+        hex.r,
+        hex.g,
+        hex.b,
+        (hex.a as f32 / 255.0) * opacity.clamp(0.0, 1.0),
+    )
 }
