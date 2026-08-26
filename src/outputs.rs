@@ -211,24 +211,38 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             (false, false) => (thickness, thickness * 4),
         };
 
+        let layer = match config.mode {
+            Mode::Fixed => Layer::Top,
+            Mode::Popup => Layer::Overlay,
+        };
+        let exclusive_zone = match config.mode {
+            Mode::Fixed => thickness as i32,
+            // -1 = ignore other surfaces' exclusive zones too.
+            Mode::Popup => -1,
+        };
+        let margin = (
+            appearance.margin,
+            appearance.margin,
+            appearance.margin,
+            appearance.margin,
+        );
+
+        info!(
+            "dock surface: mode={:?} layer={:?} exclusive_zone={} anchor={:?} size=({w},{h})",
+            config.mode, layer, exclusive_zone, config.alignment
+        );
+
         LayerShellSettings {
             namespace: "s-dock".into(),
             anchor: dock_anchor(config.position, config.alignment, stretch),
             // Popup floats above everything without shifting windows;
             // Fixed sits in its own reserved strip below windows.
-            layer: match config.mode {
-                Mode::Fixed => Layer::Top,
-                Mode::Popup => Layer::Overlay,
-            },
-            exclusive_zone: match config.mode {
-                Mode::Fixed => thickness as i32,
-                // -1 = ignore other surfaces' exclusive zones too.
-                Mode::Popup => -1,
-            },
+            layer,
+            exclusive_zone,
             size: Some((w, h)),
+            margin,
             keyboard_interactivity: KeyboardInteractivity::None,
             output,
-            ..Default::default()
         }
     })
 }
@@ -238,7 +252,7 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
 /// `HotspotWidth::Dock` spans the whole screen edge; `Pixels(n)` is a centered
 /// stripe of exactly `n` logical pixels.
 pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerShellSettings {
-    use_theme(|_appearance| {
+    use_theme(|appearance| {
         let horizontal = config.position.is_horizontal();
         let thickness = config.popup.hotspot_height;
 
@@ -254,15 +268,22 @@ pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerS
             (false, HotspotWidth::Pixels(px)) => (thickness, px),
         };
 
+        let margin = (
+            appearance.margin,
+            appearance.margin,
+            appearance.margin,
+            appearance.margin,
+        );
+
         LayerShellSettings {
             namespace: "s-dock-strip".into(),
+            margin,
             anchor,
             layer: Layer::Overlay,
             exclusive_zone: -1,
             size: Some((w, h)),
             keyboard_interactivity: KeyboardInteractivity::None,
             output,
-            ..Default::default()
         }
     })
 }
