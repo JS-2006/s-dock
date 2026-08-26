@@ -3,7 +3,7 @@ use flexi_logger::{
     Age, Cleanup, Criterion, FileSpec, LogSpecBuilder, LogSpecification, Logger, Naming,
 };
 use iced::Task;
-use log::{error, warn};
+use log::{error, info, warn};
 use std::{backtrace::Backtrace, panic, path::PathBuf};
 
 mod app;
