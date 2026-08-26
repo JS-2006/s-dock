@@ -279,10 +279,16 @@ pub enum Message {
 }
 
 pub fn subscription(path: PathBuf) -> Subscription<Message> {
-    crate::utils::watch::watch(path.clone()).map(move |event| match event {
-        crate::utils::watch::FileEvent::Changed => {
-            Message::ConfigChanged(Box::new(read_config(&path).unwrap_or_default()))
-        }
-        crate::utils::watch::FileEvent::Removed => Message::ConfigChanged(Box::default()),
+    Subscription::run_with(path.clone(), |key| {
+        let path = std::fs::canonicalize(key).unwrap_or_else(|_| key.clone());
+        iced::stream::channel(100, async move |mut output| {
+            crate::utils::watch::run_watch_loop(path.clone(), &mut output, |event| match event {
+                crate::utils::watch::FileEvent::Changed => {
+                    Message::ConfigChanged(Box::new(read_config(&path).unwrap_or_default()))
+                }
+                crate::utils::watch::FileEvent::Removed => Message::ConfigChanged(Box::default()),
+            })
+            .await
+        })
     })
 }

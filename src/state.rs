@@ -104,8 +104,15 @@ pub enum Message {
 
 /// Watches the pins file so external edits are picked up live.
 pub fn subscription(config_path: PathBuf) -> Subscription<Message> {
-    crate::utils::watch::watch(path_for(&config_path)).map(move |event| match event {
-        crate::utils::watch::FileEvent::Changed => Message::PinsChanged(Pins::load(&config_path)),
-        crate::utils::watch::FileEvent::Removed => Message::PinsChanged(Pins::load(&config_path)),
+    Subscription::run_with(config_path.clone(), move |key| {
+        let watched = crate::state::path_for(key);
+        let watched = std::fs::canonicalize(&watched).unwrap_or(watched);
+        let config_path = key.to_path_buf();
+        iced::stream::channel(100, async move |mut output| {
+            crate::utils::watch::run_watch_loop(watched, &mut output, move |_| {
+                Message::PinsChanged(Pins::load(&config_path))
+            })
+            .await
+        })
     })
 }
