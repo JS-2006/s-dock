@@ -938,11 +938,15 @@ async fn focus_window(address: &str) {
 }
 
 /// Closes a single window by address.
+///
+/// Lua mode requires the TABLE form `{ window = ... }`: a bare string
+/// argument is silently discarded by the binding and the dispatcher then
+/// falls back to closing the FOCUSED window.
 async fn close_window(address: &str) {
     let result = match compositor::hyprland_ipc::dispatch_mode().await {
         compositor::hyprland_ipc::DispatchMode::Lua => {
             compositor::hyprland_ipc::eval_dispatch(&format!(
-                "hl.dsp.window.close(\"address:{address}\")"
+                "hl.dsp.window.close({{ window = \"address:{address}\" }})"
             ))
             .await
         }
