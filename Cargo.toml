@@ -44,6 +44,7 @@ linicon-theme = "1.2.0"
 shellexpand = { version = "3", features = ["path"] }
 freedesktop-desktop-entry = "0.8.1"
 image = "0.25"
+resvg = "0.45"
 
 # Without this patch tiny-skia renders through softbuffer WITHOUT an alpha
 # channel: anything not drawn by a widget becomes opaque black, and

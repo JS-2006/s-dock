@@ -116,7 +116,7 @@ impl App {
             popup_close_generation: 0,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
-            popup_visible: false,
+            popup_visible: std::env::var_os("S_DOCK_FORCE_VISIBLE").is_some(),
             hide_generation: 0,
             strip_disarmed: false,
             drag: None,
@@ -713,7 +713,7 @@ impl App {
         // Try every candidate until one decodes; never cache failures so a
         // later theme/icon install recovers.
         for path in AppRegistry::icon_candidates(Some(&icon_name), size) {
-            if let Some(handle) = load_icon_handle(&path) {
+            if let Some(handle) = load_icon_handle(&path, size) {
                 debug!("icon '{icon_name}' -> {}", path.display());
                 self.icon_cache
                     .borrow_mut()
@@ -1042,10 +1042,10 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Decodes an icon file into a premade RGBA handle. SVGs are passed through
-/// to the svg renderer; anything that fails to decode returns `None` instead
-/// of panicking the renderer.
-fn load_icon_handle(path: &PathBuf) -> Option<image::Handle> {
+/// Decodes an icon file into a premade RGBA handle. SVGs are rasterized via
+/// resvg — they must NEVER reach `Handle::from_path`: the tiny-skia raster
+/// cache poisons failed loads and panics on the next frame.
+fn load_icon_handle(path: &PathBuf, size_px: u32) -> Option<image::Handle> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -1053,7 +1053,24 @@ fn load_icon_handle(path: &PathBuf) -> Option<image::Handle> {
         .unwrap_or_default();
 
     if ext == "svg" {
-        return Some(image::Handle::from_path(path));
+        let bytes = std::fs::read(path).ok()?;
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(&bytes, &opt).ok()?;
+
+        let svg_size = tree.size();
+        let scale = (size_px as f32 / svg_size.width()).max(0.1);
+        let (w, h) = (
+            (svg_size.width() * scale).round().max(1.0) as u32,
+            (svg_size.height() * scale).round().max(1.0) as u32,
+        );
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        return Some(image::Handle::from_rgba(w, h, pixmap.take()));
     }
 
     let bytes = std::fs::read(path).ok()?;

@@ -2625,6 +2625,7 @@ dependencies = [
  "libc",
  "linicon-theme",
  "log",
+ "resvg",
  "serde",
  "shellexpand",
  "tokio",
