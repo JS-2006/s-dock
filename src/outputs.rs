@@ -259,6 +259,18 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             (false, false) => (thickness, thickness * 4),
         };
 
+        // Room for the hover-scale icon to overflow past the dock edge.
+        let headroom = if horizontal {
+            (((appearance.hover_scale - 1.0).max(0.0)) * appearance.icon_size as f32) as u32
+        } else {
+            0
+        };
+
+        let m = appearance.margin;
+        let r = appearance.border_radius as i32;
+        // With `Full` width the rounded corners would leave gaps at the screen
+        // edges: extend the surface past the edges by the corner radius.
+        let overhang = (stretch && appearance.width == WidthMode::Full).then_some(r);
         let layer = match config.mode {
             Mode::Fixed => Layer::Top,
             Mode::Popup => Layer::Overlay,
@@ -268,16 +280,15 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             // -1 = ignore other surfaces' exclusive zones too.
             Mode::Popup => -1,
         };
-        let margin = (
-            appearance.margin,
-            appearance.margin,
-            appearance.margin,
-            appearance.margin,
-        );
+        let margin = match (horizontal, overhang) {
+            (true, Some(r)) => (m, -r, m, -r),
+            (false, Some(r)) => (-r, m, -r, m),
+            _ => (m, m, m, m),
+        };
 
         info!(
-            "dock surface: mode={:?} layer={:?} exclusive_zone={} anchor={:?} size=({w},{h})",
-            config.mode, layer, exclusive_zone, config.alignment
+            "dock surface: mode={:?} layer={:?} exclusive_zone={} anchor={:?} size=({w},{h}) margin=({:?})",
+            config.mode, layer, exclusive_zone, config.alignment, margin
         );
 
         LayerShellSettings {
@@ -287,7 +298,7 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             // Fixed sits in its own reserved strip below windows.
             layer,
             exclusive_zone,
-            size: Some((w, h)),
+            size: Some((w, h + headroom)),
             margin,
             keyboard_interactivity: KeyboardInteractivity::None,
             output,
@@ -301,7 +312,6 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
 /// stripe of exactly `n` logical pixels.
 pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerShellSettings {
     use_theme(|appearance| {
-        let horizontal = config.position.is_horizontal();
         let thickness = config.popup.hotspot_height;
 
         let anchor = match config.popup.hotspot_width {
@@ -309,19 +319,15 @@ pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerS
             HotspotWidth::Pixels(_) => dock_anchor(config.position, config.alignment, false),
         };
 
-        let (w, h) = match (horizontal, config.popup.hotspot_width) {
+        let (w, h) = match (config.position.is_horizontal(), config.popup.hotspot_width) {
             (true, HotspotWidth::Dock) => (0, thickness),
             (true, HotspotWidth::Pixels(px)) => (px, thickness),
             (false, HotspotWidth::Dock) => (thickness, 0),
             (false, HotspotWidth::Pixels(px)) => (thickness, px),
         };
 
-        let margin = (
-            appearance.margin,
-            appearance.margin,
-            appearance.margin,
-            appearance.margin,
-        );
+        let m = appearance.margin;
+        let margin = (m, m, m, m);
 
         LayerShellSettings {
             namespace: "s-dock-strip".into(),
@@ -344,28 +350,22 @@ pub fn window_list_settings(
     entries: u32,
 ) -> LayerShellSettings {
     use_theme(|appearance| {
-        const ENTRY_H: u32 = 44;
-        const PAD: u32 = 8;
-        const WIDTH: u32 = 360;
-        const MAX_VISIBLE: u32 = 8;
+        let entry_h = config.popup.entry_height.max(24);
+        let pad = 8;
+        let width = config.popup.menu_width.max(160);
+        let visible = entries.clamp(1, config.popup.max_entries.max(1));
 
-        let horizontal = config.position.is_horizontal();
-        let visible = entries.clamp(1, MAX_VISIBLE);
-        let (w, h) = if horizontal {
-            (WIDTH, visible * ENTRY_H + PAD * 2)
-        } else {
-            // Vertical dock: popup sits beside the dock, keep width modest.
-            (WIDTH, visible * ENTRY_H + PAD * 2)
-        };
+        let (w, h) = (width, visible * entry_h + pad * 2);
 
         let lift = appearance.dock_size as i32
             + appearance.margin * 2
             + config.popup.hotspot_height as i32;
+        let m = appearance.margin;
         let margin = match config.position {
-            Position::Bottom => (0, appearance.margin, lift, appearance.margin),
-            Position::Top => (lift, appearance.margin, 0, appearance.margin),
-            Position::Left => (appearance.margin, lift, appearance.margin, 0),
-            Position::Right => (appearance.margin, 0, appearance.margin, lift),
+            Position::Bottom => (0, m, lift, m),
+            Position::Top => (lift, m, 0, m),
+            Position::Left => (m, lift, m, 0),
+            Position::Right => (m, 0, m, lift),
         };
 
         LayerShellSettings {

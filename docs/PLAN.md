@@ -147,16 +147,24 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
 - [ ] 3.3 Кнопка лаунчера слева: enabled/label/cmd из конфига, клик → tokio::process cmd.
       Коммит `feat(dock): pinned apps state and launcher button`.
 
-## Этап 4. Drag-and-drop
+## Этап 4. Drag-and-drop [ГОТОВ]
 
-- [ ] 4.1 Перестановка пинов: MouseArea-press/move/release, автопрокрутка не нужна;
+- [x] 4.1 Перестановка пинов: MouseArea-press/move/release, автопрокрутка не нужна;
       сохранение нового порядка в pins.toml.
-- [ ] 4.2 Вытягивание за пределы дока → запуск экземпляра (при press запоминаем
-      иконку, рисуем её под курсором, release вне подложки → launch).
-      Поверхность дока заранее больше ряда на hover_scale-вынос (см. этап 5),
-      при активном драге расширять input region/поверхность (set_size/set_input_region).
-- [ ] Проверка: reorder переживает перезапуск; вытянул → открылось новое окно.
-      Коммит `feat(dock): drag and drop reordering and drag-out launching`.
+- [x] 4.2 Вытягивание за пределы дока при активном драге → немедленный запуск
+      (DockLeftOrDragOut); ghost-иконку под курсором отложили (v2).
+      Клик отделён от драга через press/release: release на той же иконке =
+      клик (фокус/запуск/попап). Коммит
+      `feat(dock): stages 4+5 drag-and-drop and hover scale`.
+- [ ] Проверка владельцем: reorder переживает перезапуск; вытянул → новое окно.
+
+## Этап 5. Фокус-эффект [ГОТОВ]
+
+- [x] 5.1 Hover: масштаб иконки до appearance.hover_scale; фиксированный
+      footprint кнопки (box_w/box_h по максимуму) — соседи не сдвигаются;
+      headroom в поверхности горизонтальных доков ((scale−1)·icon_size),
+      визуал прижат к краю экрана (align_y Bottom/Top). Известное
+      ограничение: headroom ловит клики (уточнить input region позже).
 
 ## Этап 5. Фокус-эффект
 

@@ -63,6 +63,21 @@ impl Pins {
         self.ids.iter().any(|i| i == id)
     }
 
+    /// Moves `id` to the position of `before_id` (drag-and-drop reorder).
+    pub fn move_before(&mut self, id: &str, before_id: &str) -> bool {
+        let Some(from) = self.ids.iter().position(|i| i == id) else {
+            return false;
+        };
+        let entry = self.ids.remove(from);
+        let target = self
+            .ids
+            .iter()
+            .position(|i| i == before_id)
+            .unwrap_or(self.ids.len());
+        self.ids.insert(target, entry);
+        self.save()
+    }
+
     /// Toggles a pin; newly pinned apps go last. Returns true if changed.
     #[allow(dead_code)]
     pub fn toggle(&mut self, id: &str) -> bool {

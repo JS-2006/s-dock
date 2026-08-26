@@ -159,7 +159,7 @@ impl Default for AppearanceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct PopupConfig {
     pub hotspot_width: HotspotWidth,
@@ -167,6 +167,14 @@ pub struct PopupConfig {
     /// Seconds without the cursor over the dock before it hides again.
     /// `0` disables auto-hide.
     pub autohide_timeout: u64,
+    /// Width of the context-menu / window-list popups, logical px.
+    pub menu_width: u32,
+    /// Height of one popup row, logical px.
+    pub entry_height: u32,
+    /// Font size of popup rows.
+    pub font_size: f32,
+    /// Rows visible before cropping (no scrolling yet).
+    pub max_entries: u32,
 }
 
 impl Default for PopupConfig {
@@ -175,6 +183,10 @@ impl Default for PopupConfig {
             hotspot_width: HotspotWidth::Dock,
             hotspot_height: 8,
             autohide_timeout: 3,
+            menu_width: 360,
+            entry_height: 44,
+            font_size: 14.0,
+            max_entries: 8,
         }
     }
 }

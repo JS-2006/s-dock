@@ -36,6 +36,10 @@ pub struct App {
     popup_visible: bool,
     /// Guards stale auto-hide timers.
     hide_generation: u64,
+    /// Active drag: (surface, group key).
+    drag: Option<(SurfaceId, String)>,
+    /// Group key currently under the cursor.
+    hovered: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,16 +49,20 @@ pub enum Message {
     WindowsReady(DockWindows),
     WindowsUpdated(DockWindows),
     PinsChanged(state::Pins),
-    IconClicked(SurfaceId, String),
     WindowClicked(String),
     CloseWindowPopup,
     ContextMenuRequested(SurfaceId, String),
+    DragStart(SurfaceId, String),
+    DragRelease(SurfaceId, String),
+    AppHover(String),
+    AppUnhover(String),
+    DragOutLaunch,
     MenuTogglePin(String),
     MenuLaunch(String),
     MenuCloseGroup(String),
     LaunchLauncher,
     DockEntered,
-    DockLeft,
+    DockLeftOrDragOut,
     AutoHideElapsed(u64),
     None,
 }
@@ -98,6 +106,8 @@ impl App {
             icon_cache: RefCell::new(HashMap::new()),
             popup_visible: false,
             hide_generation: 0,
+            drag: None,
+            hovered: None,
         }
     }
 
@@ -155,7 +165,6 @@ impl App {
                 self.pins = pins;
                 Task::none()
             }
-            Message::IconClicked(surface, key) => self.on_icon_clicked(surface, key),
             Message::WindowClicked(address) => {
                 let address2 = address.clone();
                 tokio::spawn(async move { focus_window(&address2).await });
@@ -198,8 +207,61 @@ impl App {
                 }
                 Task::none()
             }
+            Message::DragStart(surface, key) => {
+                self.drag = Some((surface, key));
+                Task::none()
+            }
+            Message::DragRelease(surface, key) => {
+                let was_dragging = self.drag.take().is_some_and(|(_, k)| k == key);
+                if !was_dragging {
+                    return Task::none();
+                }
+                // Released without leaving the button: it's a click.
+                self.on_icon_clicked(surface, key)
+            }
+            Message::AppHover(key) => {
+                self.hovered = Some(key.clone());
+
+                // Live reorder while dragging a pinned app over another pin.
+                if let Some((_, drag_key)) = self.drag.clone()
+                    && drag_key != key
+                    && drag_key.ends_with(".desktop")
+                    && key.ends_with(".desktop")
+                {
+                    self.pins.move_before(&drag_key, &key);
+                }
+                Task::none()
+            }
+            Message::AppUnhover(key) => {
+                if self.hovered.as_deref() == Some(key.as_str()) {
+                    self.hovered = None;
+                }
+                Task::none()
+            }
+            Message::DragOutLaunch => {
+                let key = self.drag.take().map(|(_, key)| key);
+                if let Some(app) = key.and_then(|key| {
+                    self.groups().into_iter().find_map(|g| {
+                        (g.key == key)
+                            .then_some(g.app)
+                            .flatten()
+                            .filter(|a| !a.exec.is_empty())
+                    })
+                }) {
+                    tokio::spawn(async move { launcher::execute(app.exec).await });
+                }
+                Task::none()
+            }
             Message::DockEntered => self.on_dock_entered(),
-            Message::DockLeft => self.on_dock_left(),
+            Message::DockLeftOrDragOut => {
+                if self.drag.is_some() {
+                    // Torn off the dock: launch and end the drag.
+                    return self.update(Message::DragOutLaunch);
+                }
+
+                self.hovered = None;
+                self.on_dock_left()
+            }
             Message::AutoHideElapsed(generation) => {
                 if self.hide_generation == generation {
                     self.popup_visible = false;
@@ -473,9 +535,17 @@ impl App {
 
         let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
 
+        // `Fit`: widen the dock past the first/last icon by the corner radius
+        // so icons never sit inside the rounded-off corners.
+        let fit_padding = match appearance.width {
+            config::WidthMode::Fit => appearance.border_radius,
+            config::WidthMode::Full => 0.0,
+        };
+
         let dock: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(appearance.dock_size as f32))
+            .padding([0.0, fit_padding])
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center)
             .style(move |theme: &iced::Theme| container::Style {
@@ -493,10 +563,27 @@ impl App {
             })
             .into();
 
+        // Horizontal docks have hover headroom in the surface: pin the visual
+        // dock to its screen edge so icons overflow toward open space.
+        let dock: Element<'_, Message> =
+            if self.config.position.is_horizontal() {
+                let align_y = match self.config.position {
+                    config::Position::Top => iced::alignment::Vertical::Top,
+                    _ => iced::alignment::Vertical::Bottom,
+                };
+                container(dock)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(align_y)
+                    .into()
+            } else {
+                dock
+            };
+
         if self.is_popup() {
             mouse_area(dock)
                 .on_enter(Message::DockEntered)
-                .on_exit(Message::DockLeft)
+                .on_exit(Message::DockLeftOrDragOut)
                 .into()
         } else {
             dock
@@ -566,13 +653,20 @@ impl App {
         let appearance = use_theme(|a| a.clone());
         let border_radius = appearance.border_radius;
         let icon_size = appearance.icon_size as f32;
+        let hovered = self.hovered.as_deref() == Some(group.key.as_str());
+        let scale = if hovered {
+            appearance.hover_scale.max(1.0)
+        } else {
+            1.0
+        };
+        let scaled = icon_size * scale;
 
         let icon_handle = self.app_icon_handle(group);
 
         let icon_element: Element<'_, Message> = match icon_handle {
             Some(handle) => image(handle)
-                .width(Length::Fixed(icon_size))
-                .height(Length::Fixed(icon_size))
+                .width(Length::Fixed(scaled))
+                .height(Length::Fixed(scaled))
                 .into(),
             None => text(
                 group
@@ -581,17 +675,34 @@ impl App {
                     .map(|a| a.name.chars().next().unwrap_or('?'))
                     .unwrap_or_else(|| group.key.chars().next().unwrap_or('?')),
             )
-            .size(icon_size * 0.7)
+            .size(scaled * 0.7)
             .into(),
         };
 
-        let inner: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance)
-        {
-            Some(dots) => column![icon_element, dots]
-                .spacing(3.0)
+        // Reserve the max footprint so neighbors never shift on hover.
+        let box_w = icon_size * appearance.hover_scale.max(1.0);
+        let dots_h = if appearance.show_running_indicator {
+            appearance.running_indicator_size + 3.0
+        } else {
+            0.0
+        };
+        let box_h = icon_size * appearance.hover_scale.max(1.0) + dots_h;
+
+        let inner: Element<'_, Message> = {
+            let col: Element<'_, Message> =
+                match self.running_dots(group.windows.len(), &appearance) {
+                    Some(dots) => column![icon_element, dots]
+                        .spacing(3.0)
+                        .align_x(iced::Alignment::Center)
+                        .into(),
+                    None => icon_element,
+                };
+            container(col)
+                .width(Length::Fixed(box_w))
+                .height(Length::Fixed(box_h))
                 .align_x(iced::Alignment::Center)
-                .into(),
-            None => icon_element,
+                .align_y(iced::Alignment::End)
+                .into()
         };
 
         let btn = button(inner)
@@ -600,10 +711,13 @@ impl App {
                 border: iced::Border::default().rounded(border_radius),
                 ..Default::default()
             })
-            .padding(2.0)
-            .on_press(Message::IconClicked(surface, group.key.clone()));
+            .padding(0.0);
 
         mouse_area(btn)
+            .on_press(Message::DragStart(surface, group.key.clone()))
+            .on_release(Message::DragRelease(surface, group.key.clone()))
+            .on_enter(Message::AppHover(group.key.clone()))
+            .on_exit(Message::AppUnhover(group.key.clone()))
             .on_right_press(Message::ContextMenuRequested(surface, group.key.clone()))
             .into()
     }
