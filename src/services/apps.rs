@@ -143,6 +143,17 @@ impl AppRegistry {
             }
         }
 
+        // Explicit hicolor pass (fallback theme every spec-compliant setup has).
+        for s in sizes {
+            if let Some(path) = freedesktop_icons::lookup(name)
+                .with_theme("hicolor")
+                .with_size(s)
+                .find()
+            {
+                return Some(path);
+            }
+        }
+
         for s in sizes {
             if let Some(path) = freedesktop_icons::lookup(name).with_size(s).find() {
                 return Some(path);

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use iced::{
     Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
+    time,
     widget::{button, column, container, image, mouse_area, row, text},
 };
 use log::{debug, info, warn};
@@ -72,6 +73,7 @@ pub enum Message {
     StripEntered,
     DockLeftOrDragOut,
     AutoHideElapsed,
+    RegionSync,
     None,
 }
 
@@ -243,10 +245,12 @@ impl App {
                 Task::none()
             }
             Message::DragStart(surface, key) => {
+                debug!("DragStart {key} on {surface:?}");
                 self.drag = Some((surface, key));
                 Task::none()
             }
             Message::DragRelease(surface, key) => {
+                debug!("DragRelease {key}");
                 let was_dragging = self.drag.take().is_some_and(|(_, k)| k == key);
                 if !was_dragging {
                     return Task::none();
@@ -288,6 +292,7 @@ impl App {
                 Task::none()
             }
             Message::StripEntered => {
+                debug!("StripEntered");
                 // Ignore the phantom enter caused by the input region
                 // expanding under a stationary cursor right after a hide.
                 if self.strip_disarmed {
@@ -299,6 +304,7 @@ impl App {
                 }
             }
             Message::DockEntered => {
+                debug!("DockEntered");
                 // A real enter on the dock itself always re-arms the strip.
                 self.strip_disarmed = false;
                 self.on_dock_entered()
@@ -316,6 +322,10 @@ impl App {
                     return Task::none();
                 }
                 self.on_dock_left()
+            }
+            Message::RegionSync => {
+                let _ = self.apply_input_regions();
+                Task::none()
             }
             Message::AutoHideElapsed => {
                 if !self.popup_visible {
@@ -915,6 +925,13 @@ impl App {
                 state::Message::PinsChanged(p) => Message::PinsChanged(p),
             }),
             output_events().map(Message::OutputEvent),
+            // Self-heal: silently-dropped set_input_region commands (surfaces
+            // not yet registered in the shell) are re-asserted here.
+            if self.is_popup() {
+                time::every(Duration::from_millis(2000)).map(|_| Message::RegionSync)
+            } else {
+                Subscription::none()
+            },
             compositor::subscribe().map(|m| match m {
                 compositor::Message::Ready(windows) => Message::WindowsReady(windows),
                 compositor::Message::Updated(windows) => Message::WindowsUpdated(windows),
