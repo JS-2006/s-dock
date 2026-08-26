@@ -17,7 +17,10 @@ mod utils;
 const TMP_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
-#[command(version, about = env!("CARGO_PKG_DESCRIPTION"))]
+#[command(
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
+    about = env!("CARGO_PKG_DESCRIPTION")
+)]
 struct Args {
     #[arg(short, long, value_parser = clap::value_parser!(PathBuf))]
     config_path: Option<PathBuf>,
@@ -74,6 +77,11 @@ fn main() -> iced::Result {
         std::process::exit(1);
     });
 
+    info!(
+        "starting s-dock {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_HASH")
+    );
     logger.set_new_spec(get_log_spec(&config.log_level));
 
     theme::init(&config.appearance);
