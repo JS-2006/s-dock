@@ -9,6 +9,7 @@ use std::{backtrace::Backtrace, panic, path::PathBuf};
 mod app;
 mod config;
 mod outputs;
+mod services;
 mod theme;
 mod utils;
 

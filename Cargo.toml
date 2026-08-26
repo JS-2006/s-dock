@@ -40,3 +40,4 @@ hyprland = "0.4.0-beta.2"
 freedesktop-icons = "0.4"
 linicon-theme = "1.2.0"
 shellexpand = { version = "3", features = ["path"] }
+freedesktop-desktop-entry = "0.8.1"

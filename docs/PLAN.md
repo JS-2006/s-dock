@@ -6,9 +6,8 @@
 > и сделай коммит (коммиты на этом проекте согласованы с владельцем).
 > Не пересматривай утверждённые решения из SPEC.md.
 
-**Статус:** этап 1 готов (включая правки владельца). Готово: 1/8 этапов.
-Следующая задача: 2.1. Примечание: 3.3 (кнопка лаунчера) выполнена досрочно в 1.6 —
-в этапе 3 останется только привязка к состоянию, если понадобится.
+**Статус:** этапы 1–2 код готов (2.4 визуальная проверка владельцем). Готово: ~2/8.
+Следующая задача: 3.1 (после подтверждения этапа 2).
 
 ## Global Constraints
 
@@ -97,18 +96,23 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
 
 ## Этап 2. Приложения и окна Hyprland
 
-- [ ] 2.1 Перенести hyprland_ipc.rs; сервис compositor: подписка socket2
-      (openwindow/closewindow/activewindow/focusedmon) + периодический полный
-      refetch `j/clients`; тип WindowInfo {address, class, title, focused}.
-- [ ] 2.2 `src/services/apps.rs`: парсинг .desktop (`freedesktop-desktop-entry`),
-      сопоставление class↔entry (StartupWMClass/name, lowercase match),
-      иконки через freedesktop-icons (theme из конфига позже, GTK theme сейчас).
-- [ ] 2.3 Модель дока: список групп AppEntry {icon, class, windows[], pinned?};
-      ЛКМ: нет окон → launch (exec из entry, через tokio::process);
-      есть → фокус `hl.dsp.focus({window="addr"})` последнего активного.
-      Точка running indicator под иконкой (конфиг). Порядок: пины затем запущенные.
-- [ ] 2.4 Проверка: реальные окна появляются/исчезают, клики работают, точки видны.
-      Коммит `feat(dock): app entries, window tracking and launching`.
+- [x] 2.1 hyprland_ipc.rs перенесён из ashell-ru без изменений;
+      services/compositor.rs: broadcaster + AsyncEventListener
+      (windowopened/closed/moved, activewindow, activemonitor, workspacechanged)
+      → полный refetch через crate (Clients::get, сортировка по focus_history_id);
+      DockWindows { windows, active }; Message::{Ready, Updated}.
+- [x] 2.2 `src/services/apps.rs`: freedesktop-desktop-entry 0.8 (Iter.entries),
+      AppRegistry с индексом match_keys (appid-stem, icon-name, name, lowercase);
+      иконки freedesktop_icons::lookup + тема linicon_theme::get_icon_theme,
+      кэш путей в App (RefCell).
+- [x] 2.3 Группировка по классу (AppGroup); ЛКМ: нет окон → запуск очищенного
+      Exec (sh -c), есть → pick_focus_target (активное окно группы иначе последнее
+      по focus history) → focus_window() через hyprland_ipc (Lua/Legacy).
+      Точка running indicator под иконкой (appearance.show_running_indicator,
+      цвет/размер из конфига). Пины добавятся в этапе 3.
+- [ ] 2.4 Визуальная проверка владельцем: окна появляются/исчезают, клик =
+      фокус/запуск, точки видны, иконки резолвятся (иначе буква-заглушка).
+      Коммит `feat(dock): app entries, window tracking and launching` выполнен.
 
 ## Этап 3. Пины и лаунчер
 
