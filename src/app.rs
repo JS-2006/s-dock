@@ -740,8 +740,10 @@ impl App {
         };
         let box_h = icon_size * appearance.hover_scale.max(1.0) + dots_h;
 
+        // Dots sit ABOVE the icon: with the button bottom-aligned, a scaled
+        // icon grows upward and pushes them along instead of clipping.
         let col: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance) {
-            Some(dots) => column![icon_element, dots]
+            Some(dots) => column![dots, icon_element]
                 .spacing(3.0)
                 .align_x(iced::Alignment::Center)
                 .into(),
