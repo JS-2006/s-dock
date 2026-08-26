@@ -172,6 +172,9 @@ impl Default for AppearanceConfig {
 pub struct PopupConfig {
     pub hotspot_width: HotspotWidth,
     pub hotspot_height: u32,
+    /// Seconds without the cursor over the dock before it hides again.
+    /// `0` disables auto-hide.
+    pub autohide_timeout: u64,
 }
 
 impl Default for PopupConfig {
@@ -179,6 +182,7 @@ impl Default for PopupConfig {
         Self {
             hotspot_width: HotspotWidth::Dock,
             hotspot_height: 8,
+            autohide_timeout: 3,
         }
     }
 }

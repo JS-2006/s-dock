@@ -3,6 +3,9 @@
 //! Mirrors the ashell-ru strategy: the initial surface created by
 //! `.layer_shell()` acts as a fallback until real outputs are detected; when
 //! the last output disappears the fallback is recreated.
+//!
+//! In `Popup` mode every output also gets a thin transparent hotspot strip
+//! surface at the screen edge; hovering it reveals the dock.
 
 use iced::{
     Anchor, KeyboardInteractivity, Layer, LayerShellSettings, OutputId, SurfaceId, Task,
@@ -11,26 +14,55 @@ use iced::{
 use log::info;
 
 use crate::{
-    config::{Alignment, Config, Mode, Position, WidthMode},
+    config::{Alignment, Config, HotspotWidth, Mode, Position, WidthMode},
     theme::use_theme,
 };
 
-struct DockSurface {
-    id: SurfaceId,
+struct OutputDock {
+    dock_id: SurfaceId,
+    strip_id: Option<SurfaceId>,
     output_id: OutputId,
     name: String,
 }
 
 #[derive(Default)]
 pub struct Outputs {
-    surfaces: Vec<DockSurface>,
+    surfaces: Vec<OutputDock>,
     /// Current fallback surface; `SurfaceId::MAIN` until replaced.
     fallback: Option<SurfaceId>,
 }
 
+/// Which surface a given `SurfaceId` refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    Dock,
+    Strip,
+}
+
 impl Outputs {
-    pub fn is_dock(&self, id: SurfaceId) -> bool {
-        self.fallback == Some(id) || self.surfaces.iter().any(|s| s.id == id)
+    pub fn kind(&self, id: SurfaceId) -> Option<SurfaceKind> {
+        if self.fallback == Some(id) {
+            return Some(SurfaceKind::Dock);
+        }
+        for s in &self.surfaces {
+            if s.dock_id == id {
+                return Some(SurfaceKind::Dock);
+            }
+            if s.strip_id == Some(id) {
+                return Some(SurfaceKind::Strip);
+            }
+        }
+        None
+    }
+
+    pub fn dock_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
+        self.fallback
+            .into_iter()
+            .chain(self.surfaces.iter().map(|s| s.dock_id))
+    }
+
+    pub fn strip_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
+        self.surfaces.iter().filter_map(|s| s.strip_id)
     }
 
     fn destroy_fallback(&mut self) -> Task<()> {
@@ -40,18 +72,33 @@ impl Outputs {
         }
     }
 
-    /// Creates a dock surface bound to the given output, replacing the
-    /// fallback surface on the first call.
+    /// Creates the dock surface (and the hotspot strip in popup mode) bound to
+    /// the given output, replacing the fallback surface on the first call.
     pub fn create(&mut self, config: &Config, name: String, output_id: OutputId) -> Task<()> {
-        let (id, task) = new_layer_surface(dock_layer_settings(config, Some(output_id)));
-        info!("Created dock surface {id:?} for output {name}");
+        let (dock_id, task) = new_layer_surface(dock_layer_settings(config, Some(output_id)));
+        info!("Created dock surface {dock_id:?} for output {name}");
+
+        let strip_task = if config.mode == Mode::Popup {
+            let (strip_id, task) = new_layer_surface(strip_layer_settings(config, Some(output_id)));
+            info!("Created hotspot strip {strip_id:?} for output {name}");
+            self.surfaces.push(OutputDock {
+                dock_id,
+                strip_id: Some(strip_id),
+                output_id,
+                name,
+            });
+            task
+        } else {
+            self.surfaces.push(OutputDock {
+                dock_id,
+                strip_id: None,
+                output_id,
+                name,
+            });
+            Task::none()
+        };
 
         let replace_fallback = self.fallback.is_some();
-        self.surfaces.push(DockSurface {
-            id,
-            output_id,
-            name,
-        });
 
         if replace_fallback {
             self.destroy_fallback()
@@ -59,6 +106,7 @@ impl Outputs {
             Task::none()
         }
         .chain(task)
+        .chain(strip_task)
     }
 
     /// Destroys every per-output surface, keeping the fallback alive, and
@@ -70,11 +118,13 @@ impl Outputs {
             .map(|s| (s.name.clone(), s.output_id))
             .collect();
 
-        let mut tasks: Vec<Task<()>> = self
-            .surfaces
-            .drain(..)
-            .map(|s| destroy_layer_surface(s.id))
-            .collect();
+        let mut tasks: Vec<Task<()>> = Vec::new();
+        for s in self.surfaces.drain(..) {
+            tasks.push(destroy_layer_surface(s.dock_id));
+            if let Some(strip) = s.strip_id {
+                tasks.push(destroy_layer_surface(strip));
+            }
+        }
 
         for (name, output_id) in existing {
             tasks.push(self.create(config, name, output_id));
@@ -89,7 +139,11 @@ impl Outputs {
         };
 
         let surface = self.surfaces.remove(pos);
-        let destroy_task = destroy_layer_surface(surface.id);
+        let mut tasks = vec![destroy_layer_surface(surface.dock_id)];
+        if let Some(strip) = surface.strip_id {
+            tasks.push(destroy_layer_surface(strip));
+        }
+        let destroy_task = Task::batch(tasks);
 
         // No outputs left: bring the fallback surface back.
         if self.surfaces.is_empty() && self.fallback.is_none() {
@@ -171,6 +225,40 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
                 // -1 = ignore other surfaces' exclusive zones too.
                 Mode::Popup => -1,
             },
+            size: Some((w, h)),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            output,
+            ..Default::default()
+        }
+    })
+}
+
+/// Layer-shell settings for the transparent hotspot strip.
+///
+/// `HotspotWidth::Dock` spans the whole screen edge; `Pixels(n)` is a centered
+/// stripe of exactly `n` logical pixels.
+pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerShellSettings {
+    use_theme(|_appearance| {
+        let horizontal = config.position.is_horizontal();
+        let thickness = config.popup.hotspot_height;
+
+        let anchor = match config.popup.hotspot_width {
+            HotspotWidth::Dock => dock_anchor(config.position, config.alignment, true),
+            HotspotWidth::Pixels(_) => dock_anchor(config.position, config.alignment, false),
+        };
+
+        let (w, h) = match (horizontal, config.popup.hotspot_width) {
+            (true, HotspotWidth::Dock) => (0, thickness),
+            (true, HotspotWidth::Pixels(px)) => (px, thickness),
+            (false, HotspotWidth::Dock) => (thickness, 0),
+            (false, HotspotWidth::Pixels(px)) => (thickness, px),
+        };
+
+        LayerShellSettings {
+            namespace: "s-dock-strip".into(),
+            anchor,
+            layer: Layer::Overlay,
+            exclusive_zone: -1,
             size: Some((w, h)),
             keyboard_interactivity: KeyboardInteractivity::None,
             output,

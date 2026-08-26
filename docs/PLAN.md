@@ -6,8 +6,10 @@
 > и сделай коммит (коммиты на этом проекте согласованы с владельцем).
 > Не пересматривай утверждённые решения из SPEC.md.
 
-**Статус:** этапы 1–2 код готов (2.4 визуальная проверка владельцем). Готово: ~2/8.
-Следующая задача: 3.1 (после подтверждения этапа 2).
+**Статус:** этапы 1–2 код готов (визуальные проверки владельцем по ходу).
+Досрочно сделано: 3.3 (лаунчер), большая часть 7 (хотспот+автоскрытие).
+Следующая задача: 3.1. В этапе 7 останется анимация выезда и
+пер-мониторная синхронизация видимости.
 
 ## Global Constraints
 
@@ -87,6 +89,16 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
       Fit = заглушка thickness*4; hot-reload пересоздаёт поверхности.
 - [x] 1.5 Проверка: `make check` зелёный; владелец подтвердил работу подложки.
       Коммит `feat: project scaffold with config and dock window`.
+- [x] 1.7 Правки владельца: автоскрытие popup-режима (`popup.autohide_timeout`,
+      сек, дефолт 3, 0=off) + хотспот-полоска как отдельная поверхность
+      (outputs.rs: strip_layer_settings, SurfaceKind::Strip); состояния
+      App.popup_visible/hide_generation, MouseArea enter/exit,
+      apply_input_regions() (скрытый док = пустой input region, полоска =
+      активна; наоборот при показе). Коммит
+      `feat(dock): popup auto-hide with configurable timeout and hotspot strip`.
+      См. также правки прозрачности (appearance.opacity, launcher.opacity)
+      и фикс центрирования кластера — коммит
+      `feat(dock): configurable element opacity, center dock cluster`.
 - [x] 1.6 Правки владельца после проверки: popup = Overlay + exclusive −1
       (поверх окон, без сдвига), fixed = Top + exclusive dock_size;
       кнопка лаунчера отрисована раньше срока (этап 3.3): позиция

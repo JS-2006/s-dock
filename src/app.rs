@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use iced::{
-    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events,
-    widget::{button, column, container, image, row, text},
+    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
+    widget::{button, column, container, image, mouse_area, row, text},
 };
 
 use crate::{
     config,
-    outputs::Outputs,
+    outputs::{Outputs, SurfaceKind},
     services::{
         apps::{AppRegistry, DesktopApp},
         compositor::{self, DockWindows},
@@ -26,6 +26,10 @@ pub struct App {
     windows: DockWindows,
     /// icon name → resolved path cache
     icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
+    /// Popup mode: whether the dock is currently shown.
+    popup_visible: bool,
+    /// Guards stale auto-hide timers.
+    hide_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +40,9 @@ pub enum Message {
     WindowsUpdated(DockWindows),
     IconClicked(String),
     LaunchLauncher,
+    DockEntered,
+    DockLeft,
+    AutoHideElapsed(u64),
     None,
 }
 
@@ -55,6 +62,8 @@ impl App {
             registry: AppRegistry::load(),
             windows: DockWindows::default(),
             icon_cache: RefCell::new(HashMap::new()),
+            popup_visible: false,
+            hide_generation: 0,
         }
     }
 
@@ -71,17 +80,27 @@ impl App {
                     .map(|_| Message::None)
             }
             Message::OutputEvent(event) => match event {
-                OutputEvent::Added(info) => self
-                    .outputs
-                    .create(&self.config, info.name.clone(), info.id)
-                    .map(|_| Message::None),
+                OutputEvent::Added(info) => {
+                    let create = self
+                        .outputs
+                        .create(&self.config, info.name.clone(), info.id);
+                    let regions = self.apply_input_regions();
+
+                    create.map(|_| Message::None).chain(regions)
+                }
                 OutputEvent::Removed(output_id) => self
                     .outputs
                     .remove(&self.config, output_id)
                     .map(|_| Message::None),
                 OutputEvent::InfoChanged(_) => Task::none(),
             },
-            Message::WindowsReady(windows) | Message::WindowsUpdated(windows) => {
+            Message::WindowsReady(windows) => {
+                self.windows = windows;
+                // First service tick after startup: enforce the initial
+                // (hidden) popup input regions.
+                self.apply_input_regions()
+            }
+            Message::WindowsUpdated(windows) => {
                 self.windows = windows;
                 Task::none()
             }
@@ -93,8 +112,83 @@ impl App {
                 }
                 Task::none()
             }
+            Message::DockEntered => self.on_dock_entered(),
+            Message::DockLeft => self.on_dock_left(),
+            Message::AutoHideElapsed(generation) => {
+                if self.hide_generation == generation {
+                    self.popup_visible = false;
+                }
+                self.apply_input_regions()
+            }
             Message::None => Task::none(),
         }
+    }
+
+    fn is_popup(&self) -> bool {
+        self.config.mode == config::Mode::Popup
+    }
+
+    fn on_dock_entered(&mut self) -> Task<Message> {
+        if !self.is_popup() {
+            return Task::none();
+        }
+        // (Re-)entering cancels any pending auto-hide.
+        self.hide_generation = self.hide_generation.wrapping_add(1);
+        let was_visible = self.popup_visible;
+        self.popup_visible = true;
+
+        if was_visible {
+            Task::none()
+        } else {
+            self.apply_input_regions()
+        }
+    }
+
+    fn on_dock_left(&mut self) -> Task<Message> {
+        if !self.is_popup() || !self.popup_visible {
+            return Task::none();
+        }
+        let timeout = self.config.popup.autohide_timeout;
+        if timeout == 0 {
+            return Task::none();
+        }
+        self.hide_generation = self.hide_generation.wrapping_add(1);
+        let generation = self.hide_generation;
+
+        Task::perform(
+            async move { tokio::time::sleep(Duration::from_secs(timeout)).await },
+            move |_| Message::AutoHideElapsed(generation),
+        )
+    }
+
+    /// Syncs pointer input regions with popup visibility: when hidden the dock
+    /// surface must not intercept clicks and the strips must catch hover;
+    /// when visible it's the opposite.
+    fn apply_input_regions(&self) -> Task<Message> {
+        if !self.is_popup() {
+            return Task::none();
+        }
+        let dock_region = if self.popup_visible {
+            None
+        } else {
+            Some(Vec::new())
+        };
+        let strip_region = if self.popup_visible {
+            Some(Vec::new())
+        } else {
+            None
+        };
+
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for id in self.outputs.strip_ids() {
+            tasks
+                .push(set_input_region::<Message>(id, strip_region.clone()).map(|_| Message::None));
+        }
+        for id in self.outputs.dock_ids() {
+            tasks.push(set_input_region::<Message>(id, dock_region.clone()).map(|_| Message::None));
+        }
+
+        Task::batch(tasks)
     }
 
     fn on_icon_clicked(&mut self, class: String) -> Task<Message> {
@@ -144,7 +238,14 @@ impl App {
     }
 
     pub fn view(&self, id: SurfaceId) -> Element<'_, Message> {
-        if !self.outputs.is_dock(id) {
+        match self.outputs.kind(id) {
+            Some(SurfaceKind::Strip) => return self.strip_view(),
+            Some(SurfaceKind::Dock) => {}
+            None => return row![].into(),
+        }
+
+        // A hidden popup dock renders nothing (its input region is cleared).
+        if self.is_popup() && !self.popup_visible {
             return row![].into();
         }
 
@@ -188,7 +289,7 @@ impl App {
 
         let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
 
-        container(content)
+        let dock: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(appearance.dock_size as f32))
             .align_x(iced::alignment::Horizontal::Center)
@@ -206,6 +307,22 @@ impl App {
                 text_color: Some(theme.palette().text),
                 ..Default::default()
             })
+            .into();
+
+        if self.is_popup() {
+            mouse_area(dock)
+                .on_enter(Message::DockEntered)
+                .on_exit(Message::DockLeft)
+                .into()
+        } else {
+            dock
+        }
+    }
+
+    /// Transparent hotspot strip: hovering it reveals the dock.
+    fn strip_view(&self) -> Element<'_, Message> {
+        mouse_area(container(row![]).width(Length::Fill).height(Length::Fill))
+            .on_enter(Message::DockEntered)
             .into()
     }
 
@@ -337,3 +454,4 @@ fn color_from_hex(hex: hex_color::HexColor, opacity: f32) -> iced::Color {
 }
 
 use log::{info, warn};
+use std::time::Duration;

@@ -24,8 +24,9 @@ running_indicator_color = "#89b4fa"
 running_indicator_size = 5
 
 [popup]
-hotspot_width = "dock"      # "dock" или число px
+hotspot_width = "dock"      # "dock" — во всю ширину края, или число px
 hotspot_height = 8
+autohide_timeout = 3        # сек без курсора на доке до скрытия; 0 = не скрывать
 
 [launcher]
 enabled = true
