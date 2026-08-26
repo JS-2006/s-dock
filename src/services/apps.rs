@@ -2,7 +2,9 @@
 //! icon lookup.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use freedesktop_desktop_entry::{DesktopEntry, Iter, default_paths};
 
@@ -15,6 +17,9 @@ pub struct DesktopApp {
     /// Cleaned `Exec` value (field codes stripped).
     pub exec: String,
     pub icon: Option<String>,
+    /// `StartupWMClass` from the desktop entry, used to match running windows
+    /// whose class doesn't resemble the app id (e.g. Wine apps).
+    pub wm_class: Option<String>,
 }
 
 impl DesktopApp {
@@ -44,6 +49,7 @@ impl DesktopApp {
             name,
             exec: entry.exec().map(clean_exec).unwrap_or_default(),
             icon: entry.icon().map(str::to_string),
+            wm_class: entry.startup_wm_class().map(str::to_string),
         }
     }
 
@@ -55,6 +61,7 @@ impl DesktopApp {
             Some(stem.to_lowercase()),
             self.icon.as_ref().map(|i| i.to_lowercase()),
             Some(self.name.to_lowercase()),
+            self.wm_class.as_ref().map(|w| w.to_lowercase()),
         ]
         .into_iter()
         .flatten()
@@ -114,6 +121,13 @@ impl AppRegistry {
     }
 
     /// Resolves all plausible icon files for this icon name, best first.
+    ///
+    /// Strategy (robust and theme-agnostic): first ask the freedesktop icon
+    /// theme resolver (respects the user's theme + inheritance), then fall back
+    /// to a one-time global index of every icon file on disk. That way any icon
+    /// present anywhere — pixmaps, an unindexed theme directory, a different
+    /// theme — is found by any reasonable name variant, independent of the
+    /// on-disk directory layout.
     pub fn icon_candidates(icon: Option<&str>, size: u32) -> Vec<PathBuf> {
         let Some(name) = icon else { return Vec::new() };
 
@@ -123,122 +137,155 @@ impl AppRegistry {
         }
 
         let requested = u16::try_from(size).unwrap_or(u16::MAX);
-        let sizes = [requested, 128, 96, 64, 48, 32, 24, 512, 256];
-
-        // Base names to try. Many app icons ship under a stripped or lowercased
-        // filename — especially those absent from the icon theme (reverse-DNS
-        // ids, Flatpak apps, pixmap-only icons).
-        let mut bases: Vec<String> = Vec::new();
-        let push_base = |bases: &mut Vec<String>, s: &str| {
-            if !s.is_empty() && !bases.iter().any(|x| x.eq_ignore_ascii_case(s)) {
-                bases.push(s.to_string());
-            }
-        };
-        push_base(&mut bases, name);
-        push_base(&mut bases, &name.to_lowercase());
-        // Reverse-DNS / Flatpak style ids (org.vendor.App, org.vendor.app_appid):
-        // try each dot-component and the leading segment of a `vendor_app` part.
-        for comp in name.split('.') {
-            push_base(&mut bases, comp);
-            push_base(&mut bases, &comp.to_lowercase());
-            if let Some(u) = comp.find('_') {
-                push_base(&mut bases, &comp[..u]);
-                push_base(&mut bases, &comp[..u].to_lowercase());
-            }
-        }
-
+        let names = candidate_names(name);
         let mut out: Vec<PathBuf> = Vec::new();
-        let push_unique = |out: &mut Vec<PathBuf>, p: PathBuf| {
-            if p.is_file() && !out.contains(&p) {
-                out.push(p);
+        let push_unique = |out: &mut Vec<PathBuf>, p: &Path| {
+            if p.is_file() && !out.iter().any(|x| x == p) {
+                out.push(p.to_path_buf());
             }
         };
 
-        let themes: Vec<String> = linicon_theme::get_icon_theme()
-            .into_iter()
-            .chain(std::iter::once("hicolor".to_string()))
-            .collect();
-
-        // 1) Theme-indexed lookup — fast and correct for themed icons.
-        for base in &bases {
-            for theme_name in &themes {
-                for s in sizes {
-                    if let Some(p) = freedesktop_icons::lookup(base)
-                        .with_theme(theme_name)
-                        .with_size(s)
-                        .find()
-                    {
-                        push_unique(&mut out, p);
-                    }
-                }
-            }
-            for s in sizes {
-                if let Some(p) = freedesktop_icons::lookup(base).with_size(s).find() {
-                    push_unique(&mut out, p);
-                }
+        // 1) Proper themed lookup — correct for icons present in a theme index.
+        for n in &names {
+            if let Some(p) = freedesktop_icons::lookup(n).with_size(requested).find() {
+                push_unique(&mut out, &p);
             }
         }
 
-        // A themed icon was already resolved; no need to walk the filesystem.
         if !out.is_empty() {
             return out;
         }
 
-        // 2) Direct filesystem scan — covers icons present on disk but missing
-        //    from the theme index (pixmaps, or a theme's apps/ tree).
-        const EXTENSIONS: [&str; 4] = ["png", "svg", "jpg", "xpm"];
-        let mut roots: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
-            .map(|v| {
-                std::env::split_paths(&v)
-                    .flat_map(|d| [d.join("icons"), d.join("pixmaps")])
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        roots.push(PathBuf::from("/usr/share/icons"));
-        roots.push(PathBuf::from("/usr/share/pixmaps"));
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            roots.push(home.join(".local/share/icons"));
-            roots.push(home.join(".local/share/pixmaps"));
-            roots.push(home.join(".icons"));
-        }
-
-        let subdirs = ["apps", "scalable/apps"];
-        for root in &roots {
-            for theme in &themes {
-                for s in sizes {
-                    let dir = root.join(theme).join(format!("{s}x{s}")).join("apps");
-                    for base in &bases {
-                        for ext in EXTENSIONS {
-                            let p = dir.join(format!("{base}.{ext}"));
-                            if p.is_file() {
-                                push_unique(&mut out, p);
-                            }
-                        }
-                    }
-                }
-                for sub in subdirs {
-                    let dir = root.join(theme).join(sub);
-                    for base in &bases {
-                        for ext in EXTENSIONS {
-                            let p = dir.join(format!("{base}.{ext}"));
-                            if p.is_file() {
-                                push_unique(&mut out, p);
-                            }
-                        }
-                    }
-                }
-            }
-            for base in &bases {
-                for ext in EXTENSIONS {
-                    let p = root.join(format!("{base}.{ext}"));
-                    if p.is_file() {
-                        push_unique(&mut out, p);
-                    }
-                }
+        // 2) Global index fallback — covers everything the theme index misses.
+        let idx = icon_index();
+        for n in &names {
+            if let Some(p) = idx.by_stem.get(&n.to_lowercase()) {
+                push_unique(&mut out, p);
             }
         }
 
         out
     }
+}
+
+/// Name variants to try when resolving an icon: the name itself, lowercased,
+/// and every segment obtained by splitting on `.`, `_` and `-` (so a Flatpak /
+/// reverse-DNS id like `org.localsend.localsend_app` also yields `localsend`).
+fn candidate_names(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |out: &mut Vec<String>, s: &str| {
+        if !s.is_empty() && !out.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+            out.push(s.to_string());
+        }
+    };
+    push(&mut out, name);
+    push(&mut out, &name.to_lowercase());
+    for comp in name.split(['.', '_', '-']) {
+        push(&mut out, comp);
+        push(&mut out, &comp.to_lowercase());
+    }
+    out
+}
+
+/// A lazily-built, process-wide index of every icon file on disk, keyed by
+/// lowercased file stem, keeping the best-looking variant per stem.
+struct IconIndex {
+    by_stem: HashMap<String, PathBuf>,
+}
+
+static ICON_INDEX: OnceLock<IconIndex> = OnceLock::new();
+
+fn icon_index() -> &'static IconIndex {
+    ICON_INDEX.get_or_init(IconIndex::build)
+}
+
+impl IconIndex {
+    fn build() -> Self {
+        let mut scored: HashMap<String, (u32, PathBuf)> = HashMap::new();
+        for root in icon_roots() {
+            walk_icons(&root, &mut scored);
+        }
+        let by_stem = scored.into_iter().map(|(k, (_, p))| (k, p)).collect();
+        IconIndex { by_stem }
+    }
+}
+
+/// Directories that may contain application icons.
+fn icon_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
+        .map(|v| {
+            std::env::split_paths(&v)
+                .flat_map(|d| [d.join("icons"), d.join("pixmaps")])
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    roots.push(PathBuf::from("/usr/share/icons"));
+    roots.push(PathBuf::from("/usr/share/pixmaps"));
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        roots.push(home.join(".local/share/icons"));
+        roots.push(home.join(".local/share/pixmaps"));
+        roots.push(home.join(".icons"));
+    }
+    roots
+}
+
+/// Recursively collects icon files, keeping the best candidate per stem.
+fn walk_icons(dir: &Path, scored: &mut HashMap<String, (u32, PathBuf)>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ftype) = entry.file_type() else {
+            continue;
+        };
+        if ftype.is_symlink() {
+            continue;
+        }
+        if ftype.is_dir() {
+            walk_icons(&path, scored);
+        } else if ftype.is_file() {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let stem = stem.to_ascii_lowercase();
+            if stem.is_empty() {
+                continue;
+            }
+            let score = icon_score(&path);
+            let slot = scored.entry(stem).or_insert((0, path.clone()));
+            if score > slot.0 {
+                slot.0 = score;
+                slot.1 = path.clone();
+            }
+        }
+    }
+}
+
+/// Prefer scalable vector icons, then larger rasters.
+fn icon_score(path: &Path) -> u32 {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = match ext.as_str() {
+        "svg" => 2_000_000,
+        "png" | "jpg" | "jpeg" | "webp" => 1_000_000,
+        _ => 0,
+    };
+    let size = path
+        .components()
+        .filter_map(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            if let Some((a, _)) = s.split_once('x') {
+                a.parse::<u32>().ok()
+            } else {
+                s.parse::<u32>().ok()
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    kind + size
 }

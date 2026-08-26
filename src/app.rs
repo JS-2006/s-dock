@@ -754,15 +754,48 @@ impl App {
                 .width(Length::Fixed(scaled))
                 .height(Length::Fixed(scaled))
                 .into(),
-            None => text(
-                group
+            None => {
+                // No icon resolvable (e.g. a Wine/RDP app whose .desktop points at
+                // a missing file): show a deterministic coloured monogram tile
+                // so the dock stays visually consistent.
+                let label = group
                     .app
                     .as_ref()
-                    .map(|a| a.name.chars().next().unwrap_or('?'))
-                    .unwrap_or_else(|| key.chars().next().unwrap_or('?')),
-            )
-            .size(scaled * 0.7)
-            .into(),
+                    .and_then(|a| a.name.chars().next())
+                    .or_else(|| key.chars().next())
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .next()
+                    .unwrap_or('?');
+                let palette = [
+                    iced::Color::from_rgb(0.90, 0.10, 0.29),
+                    iced::Color::from_rgb(0.24, 0.71, 0.29),
+                    iced::Color::from_rgb(0.26, 0.39, 0.85),
+                    iced::Color::from_rgb(0.96, 0.51, 0.19),
+                    iced::Color::from_rgb(0.57, 0.12, 0.71),
+                    iced::Color::from_rgb(0.27, 0.94, 0.94),
+                    iced::Color::from_rgb(0.94, 0.20, 0.90),
+                    iced::Color::from_rgb(0.74, 0.96, 0.05),
+                ];
+                let hash = key.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32));
+                let color = palette[(hash % palette.len() as u32) as usize];
+                container(
+                    text(label)
+                        .size(scaled * 0.5)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center),
+                )
+                .width(Length::Fixed(scaled))
+                .height(Length::Fixed(scaled))
+                .align_x(iced::Alignment::Center)
+                .align_y(iced::Alignment::Center)
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(color)),
+                    border: iced::Border::default().rounded(border_radius),
+                    ..Default::default()
+                })
+                .into()
+            }
         };
 
         // Reserve the max footprint so neighbors never shift on hover.
