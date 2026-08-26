@@ -16,11 +16,12 @@ panic = "abort"
 iced = { package = "iced_layershell", git = "https://github.com/MalpenZibo/iced_layershell", tag = "v0.1.5", features = [
   "tokio",
   "advanced",
-  "wgpu",
+  # Software renderer only: wgpu re-inits its GLES context on every new
+  # layer surface ("Re-initializing Gles context"), which freezes frames,
+  # loses textures (vanishing icons) and makes the dock look dead.
   "tiny-skia",
   "image",
   "svg",
-  "canvas",
 ] }
 tokio = { version = "1", default-features = false, features = ["net", "rt", "rt-multi-thread", "process", "time", "io-util", "sync", "macros"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
