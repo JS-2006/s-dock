@@ -7,6 +7,8 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use iced::Subscription;
+
 const FILE_NAME: &str = "pins.toml";
 
 /// Derives the pins file path next to the main config file.
@@ -26,11 +28,14 @@ struct PinsFile {
 /// Ordered list of pinned application ids (`*.desktop`).
 #[derive(Debug, Clone, Default)]
 pub struct Pins {
+    /// Kept for `save`/`toggle` once the context menu lands.
+    #[allow(dead_code)]
     path: PathBuf,
     ids: Vec<String>,
 }
 
 impl Pins {
+    /// Loads pins; also the re-entry point for external file edits.
     pub fn load(config_path: &Path) -> Self {
         let path = path_for(config_path);
 
@@ -50,29 +55,12 @@ impl Pins {
         Self { path, ids }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn ids(&self) -> &[String] {
         &self.ids
     }
 
-    /// Reloads from disk keeping the same path (used by the file watcher).
-    pub fn reload_from_disk(&mut self) {
-        *self = Pins::load(
-            self.path
-                .parent()
-                .map(|p| p.join("config.toml"))
-                .unwrap_or_else(|| PathBuf::from("config.toml")),
-        );
-    }
-
-    pub fn contains(&self, id: &str) -> bool {
-        self.ids.iter().any(|i| i == id)
-    }
-
     /// Toggles a pin; newly pinned apps go last. Returns true if changed.
+    #[allow(dead_code)]
     pub fn toggle(&mut self, id: &str) -> bool {
         if let Some(pos) = self.ids.iter().position(|i| i == id) {
             self.ids.remove(pos);
@@ -82,22 +70,7 @@ impl Pins {
         self.save()
     }
 
-    /// Moves `id` before `before_id` (used by drag-and-drop reordering).
-    pub fn move_before(&mut self, id: &str, before_id: &str) -> bool {
-        let Some(from) = self.ids.iter().position(|i| i == id) else {
-            return false;
-        };
-        let entry = self.ids.remove(from);
-
-        let target = self
-            .ids
-            .iter()
-            .position(|i| i == before_id)
-            .unwrap_or(self.ids.len());
-        self.ids.insert(target, entry);
-        self.save()
-    }
-
+    #[allow(dead_code)]
     pub fn save(&self) -> bool {
         let content = match toml::to_string_pretty(&PinsFile {
             pins: self.ids.clone(),
@@ -122,4 +95,17 @@ impl Pins {
 
         true
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    PinsChanged(Pins),
+}
+
+/// Watches the pins file so external edits are picked up live.
+pub fn subscription(config_path: PathBuf) -> Subscription<Message> {
+    crate::utils::watch::watch(path_for(&config_path)).map(move |event| match event {
+        crate::utils::watch::FileEvent::Changed => Message::PinsChanged(Pins::load(&config_path)),
+        crate::utils::watch::FileEvent::Removed => Message::PinsChanged(Pins::load(&config_path)),
+    })
 }

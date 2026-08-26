@@ -5,18 +5,10 @@
 //! Pinned applications intentionally live in a separate state file
 //! (`~/.config/s-dock/pins.toml`), not here.
 
-use iced::{
-    Subscription,
-    futures::{SinkExt, StreamExt},
-    stream::channel,
-};
-use inotify::WatchMask;
-use log::{debug, error, info, warn};
+use iced::Subscription;
+use log::{info, warn};
 use serde::Deserialize;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG_FILE_PATH: &str = "~/.config/s-dock/config.toml";
 
@@ -281,110 +273,16 @@ pub fn get_config(
     }
 }
 
-enum Event {
-    Changed,
-    Removed,
-}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     ConfigChanged(Box<Config>),
 }
 
-pub fn subscription(path: &Path) -> Subscription<Message> {
-    let path = path.to_path_buf();
-
-    Subscription::run_with(path, |path| {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        channel(100, async move |mut output| {
-            match (path.parent(), path.file_name(), inotify::Inotify::init()) {
-                (Some(folder), Some(file_name), Ok(inotify)) => {
-                    debug!("Watching config file at {path:?}");
-
-                    let res = inotify.watches().add(
-                        folder,
-                        WatchMask::CREATE | WatchMask::DELETE | WatchMask::MOVE | WatchMask::MODIFY,
-                    );
-
-                    if let Err(e) = res {
-                        error!("Failed to add watch for {folder:?}: {e}");
-                        return;
-                    }
-
-                    let buffer = [0; 1024];
-                    let stream = inotify.into_event_stream(buffer);
-
-                    if let Ok(stream) = stream {
-                        let mut stream = stream.ready_chunks(10);
-
-                        loop {
-                            let events = stream.next().await.unwrap_or_default();
-
-                            let mut file_event: Option<Event> = None;
-
-                            for event in events {
-                                match event {
-                                    Ok(inotify::Event {
-                                        name: Some(name),
-                                        mask:
-                                            inotify::EventMask::DELETE | inotify::EventMask::MOVED_FROM,
-                                        ..
-                                    }) if file_name == name => {
-                                        file_event = Some(Event::Removed);
-                                    }
-                                    Ok(inotify::Event {
-                                        name: Some(name),
-                                        mask:
-                                            inotify::EventMask::CREATE
-                                            | inotify::EventMask::MODIFY
-                                            | inotify::EventMask::MOVED_TO,
-                                        ..
-                                    }) if file_name == name => {
-                                        file_event = Some(Event::Changed);
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            match file_event {
-                                Some(Event::Changed) => {
-                                    info!("Reload config file");
-
-                                    let new_config = read_config(&path).unwrap_or_default();
-
-                                    let _ = output
-                                        .send(Message::ConfigChanged(Box::new(new_config)))
-                                        .await;
-                                }
-                                Some(Event::Removed) => {
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-
-                                    if !path.exists() {
-                                        info!("Config file removed");
-                                        let _ = output
-                                            .send(Message::ConfigChanged(Box::default()))
-                                            .await;
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                    } else {
-                        error!("Failed to create inotify event stream");
-                    }
-                }
-                (None, _, _) => {
-                    error!(
-                        "Config file path does not have a parent directory, cannot watch for changes"
-                    );
-                }
-                (_, None, _) => {
-                    error!("Config file path does not have a file name, cannot watch for changes");
-                }
-                (_, _, Err(e)) => {
-                    error!("Failed to initialize inotify: {e}");
-                }
-            }
-        })
+pub fn subscription(path: PathBuf) -> Subscription<Message> {
+    crate::utils::watch::watch(path.clone()).map(move |event| match event {
+        crate::utils::watch::FileEvent::Changed => {
+            Message::ConfigChanged(Box::new(read_config(&path).unwrap_or_default()))
+        }
+        crate::utils::watch::FileEvent::Removed => Message::ConfigChanged(Box::default()),
     })
 }

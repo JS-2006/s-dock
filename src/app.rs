@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use iced::{
     Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
     widget::{button, column, container, image, mouse_area, row, text},
 };
+use log::{info, warn};
 
 use crate::{
     config,
@@ -14,6 +16,7 @@ use crate::{
         apps::{AppRegistry, DesktopApp},
         compositor::{self, DockWindows},
     },
+    state,
     theme::use_theme,
     utils::launcher,
 };
@@ -24,6 +27,7 @@ pub struct App {
     outputs: Outputs,
     registry: AppRegistry,
     windows: DockWindows,
+    pins: state::Pins,
     /// icon name → resolved path cache
     icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
     /// Popup mode: whether the dock is currently shown.
@@ -38,6 +42,7 @@ pub enum Message {
     OutputEvent(OutputEvent),
     WindowsReady(DockWindows),
     WindowsUpdated(DockWindows),
+    PinsChanged(state::Pins),
     IconClicked(String),
     LaunchLauncher,
     DockEntered,
@@ -46,21 +51,25 @@ pub enum Message {
     None,
 }
 
-/// A dock entry: one running application (grouped by window class).
+/// A dock entry: one application slot (grouped by resolved desktop id or,
+/// for unknown apps, by raw window class).
 struct AppGroup {
-    class: String,
+    key: String,
     app: Option<DesktopApp>,
     windows: Vec<compositor::WindowInfo>,
 }
 
 impl App {
     pub fn new((config, config_path): (config::Config, PathBuf)) -> Self {
+        let pins = state::Pins::load(&config_path);
+
         Self {
             config,
             config_path,
             outputs: Outputs::default(),
             registry: AppRegistry::load(),
             windows: DockWindows::default(),
+            pins,
             icon_cache: RefCell::new(HashMap::new()),
             popup_visible: false,
             hide_generation: 0,
@@ -75,9 +84,10 @@ impl App {
                 crate::theme::update(&self.config.appearance);
 
                 // Geometry-affecting options require fresh surfaces.
-                self.outputs
-                    .recreate_all(&self.config)
-                    .map(|_| Message::None)
+                let recreate = self.outputs.recreate_all(&self.config);
+                let regions = self.apply_input_regions();
+
+                recreate.map(|_| Message::None).chain(regions)
             }
             Message::OutputEvent(event) => match event {
                 OutputEvent::Added(info) => {
@@ -104,7 +114,12 @@ impl App {
                 self.windows = windows;
                 Task::none()
             }
-            Message::IconClicked(class) => self.on_icon_clicked(class),
+            Message::PinsChanged(pins) => {
+                info!("Pins reloaded");
+                self.pins = pins;
+                Task::none()
+            }
+            Message::IconClicked(key) => self.on_icon_clicked(key),
             Message::LaunchLauncher => {
                 let cmd = self.config.launcher.cmd.clone();
                 if !cmd.is_empty() {
@@ -191,50 +206,83 @@ impl App {
         Task::batch(tasks)
     }
 
-    fn on_icon_clicked(&mut self, class: String) -> Task<Message> {
-        let windows: Vec<compositor::WindowInfo> = self
-            .windows
-            .windows
-            .iter()
-            .filter(|w| w.class.eq_ignore_ascii_case(&class))
-            .cloned()
-            .collect();
+    fn on_icon_clicked(&mut self, key: String) -> Task<Message> {
+        let Some(group) = self.groups().into_iter().find(|g| g.key == key) else {
+            return Task::none();
+        };
 
-        if let Some(target) = pick_focus_target(&windows, &self.windows.active) {
+        if let Some(target) = pick_focus_target(&group.windows, &self.windows.active) {
             let address = target.address.clone();
             tokio::spawn(async move { focus_window(&address).await });
             return Task::none();
         }
 
         // Not running: launch a new instance.
-        if let Some(app) = self.registry.by_class(&class).cloned() {
-            if !app.exec.is_empty() {
-                tokio::spawn(async move { launcher::execute(app.exec).await });
-            } else {
-                warn!("No exec for '{}' ({class})", app.name);
-            }
+        if let Some(app) = group.app.filter(|a| !a.exec.is_empty()) {
+            tokio::spawn(async move { launcher::execute(app.exec).await });
+        } else {
+            warn!("Nothing to launch for '{key}'");
         }
 
         Task::none()
     }
 
     fn groups(&self) -> Vec<AppGroup> {
-        let mut groups: Vec<AppGroup> = Vec::new();
-        for window in &self.windows.windows {
-            if let Some(group) = groups
-                .iter_mut()
-                .find(|g| g.class.eq_ignore_ascii_case(&window.class))
-            {
-                group.windows.push(window.clone());
-            } else {
-                groups.push(AppGroup {
-                    class: window.class.clone(),
-                    app: self.registry.by_class(&window.class).cloned(),
-                    windows: vec![window.clone()],
-                });
+        let mut order: Vec<AppGroup> = Vec::new();
+        let mut index_of: HashMap<String, usize> = HashMap::new();
+        // Window classes already absorbed into a pinned group.
+        let mut absorbed: std::collections::HashSet<String> = Default::default();
+
+        // Pinned apps first, in pins-file order.
+        for id in self.pins.ids() {
+            let Some(app) = self.registry.by_id(id).cloned() else {
+                warn!("Pinned app not found: {id}");
+                continue;
+            };
+            let keys: Vec<String> = app.match_keys().collect();
+            let windows: Vec<compositor::WindowInfo> = self
+                .windows
+                .windows
+                .iter()
+                .filter(|w| keys.iter().any(|k| w.class.to_lowercase() == *k))
+                .cloned()
+                .collect();
+            for w in &windows {
+                absorbed.insert(w.class.to_lowercase());
             }
+
+            index_of.insert(id.clone(), order.len());
+            order.push(AppGroup {
+                key: id.clone(),
+                app: Some(app),
+                windows,
+            });
         }
-        groups
+
+        // Then running unpinned applications.
+        for window in &self.windows.windows {
+            if absorbed.contains(&window.class.to_lowercase()) {
+                continue;
+            }
+            let app = self.registry.by_class(&window.class);
+            let key = app
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| format!("raw:{}", window.class.to_lowercase()));
+
+            if let Some(&i) = index_of.get(&key) {
+                order[i].windows.push(window.clone());
+                continue;
+            }
+
+            index_of.insert(key.clone(), order.len());
+            order.push(AppGroup {
+                key,
+                app: app.cloned(),
+                windows: vec![window.clone()],
+            });
+        }
+
+        order
     }
 
     pub fn view(&self, id: SurfaceId) -> Element<'_, Message> {
@@ -355,13 +403,13 @@ impl App {
                     .app
                     .as_ref()
                     .map(|a| a.name.chars().next().unwrap_or('?'))
-                    .unwrap_or_else(|| group.class.chars().next().unwrap_or('?')),
+                    .unwrap_or_else(|| group.key.chars().next().unwrap_or('?')),
             )
             .size(icon_size * 0.7)
             .into(),
         };
 
-        let dot = appearance.show_running_indicator.then(|| {
+        let dot = (!group.windows.is_empty() && appearance.show_running_indicator).then(|| {
             let size = appearance.running_indicator_size;
             let color = color_from_hex(appearance.running_indicator_color, 1.0);
             container(row![])
@@ -392,14 +440,17 @@ impl App {
                 ..Default::default()
             })
             .padding(2.0)
-            .on_press(Message::IconClicked(group.class.clone()))
+            .on_press(Message::IconClicked(group.key.clone()))
             .into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
-            config::subscription(&self.config_path).map(|m| match m {
+            config::subscription(self.config_path.clone()).map(|m| match m {
                 config::Message::ConfigChanged(c) => Message::ConfigChanged(c),
+            }),
+            state::subscription(self.config_path.clone()).map(|m| match m {
+                state::Message::PinsChanged(p) => Message::PinsChanged(p),
             }),
             output_events().map(Message::OutputEvent),
             compositor::subscribe().map(|m| match m {
@@ -452,6 +503,3 @@ fn color_from_hex(hex: hex_color::HexColor, opacity: f32) -> iced::Color {
         (hex.a as f32 / 255.0) * opacity.clamp(0.0, 1.0),
     )
 }
-
-use log::{info, warn};
-use std::time::Duration;

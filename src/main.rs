@@ -10,6 +10,7 @@ mod app;
 mod config;
 mod outputs;
 mod services;
+mod state;
 mod theme;
 mod utils;
 

@@ -1,0 +1,6 @@
+# Пример ~/.config/s-dock/pins.toml
+# Порядок в списке = порядок иконок в доке (слева направо).
+# Id можно посмотреть в /usr/share/applications/*.desktop
+# или ~/.local/share/applications/*.desktop
+
+pins = ["firefox.desktop", "org.kde.dolphin.desktop", "code-oss.desktop"]

@@ -102,6 +102,11 @@ impl AppRegistry {
         self.index = index;
     }
 
+    /// Finds an app by its desktop file id (case-insensitive).
+    pub fn by_id(&self, id: &str) -> Option<&DesktopApp> {
+        self.apps.iter().find(|a| a.id.eq_ignore_ascii_case(id))
+    }
+
     /// Finds the app matching a window class (case-insensitive).
     pub fn by_class(&self, class: &str) -> Option<&DesktopApp> {
         let key = class.to_lowercase();
