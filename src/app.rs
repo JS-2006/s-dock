@@ -659,28 +659,47 @@ impl App {
     }
 
     fn app_icon_handle(&self, group: &AppGroup) -> Option<image::Handle> {
-        let icon_name = group.app.as_ref()?.icon.clone()?;
         let size = use_theme(|a| a.icon_size.max(48));
 
-        {
-            let cache = self.icon_cache.borrow_mut();
-            if let Some(handle) = cache.get(&icon_name) {
-                return handle.clone();
+        // Candidate names: the .desktop icon, then the app name and the window
+        // class — covers apps whose .desktop has no Icon= field or whose icon
+        // isn't in the theme.
+        let mut names: Vec<String> = Vec::new();
+        if let Some(app) = &group.app {
+            if let Some(icon) = &app.icon {
+                names.push(icon.clone());
             }
+            names.push(app.name.clone());
+        }
+        if let Some(w) = group.windows.first().filter(|w| !w.class.is_empty()) {
+            names.push(w.class.clone());
         }
 
-        // Failures are not cached: a theme/icon install should recover.
-        for path in AppRegistry::icon_candidates(Some(&icon_name), size) {
-            if let Some(handle) = load_icon_handle(&path, size) {
-                debug!("icon '{icon_name}' -> {}", path.display());
-                self.icon_cache
-                    .borrow_mut()
-                    .insert(icon_name, Some(handle.clone()));
-                return Some(handle);
+        for name in &names {
+            if name.is_empty() {
+                continue;
             }
+            {
+                let cache = self.icon_cache.borrow_mut();
+                if let Some(handle) = cache.get(name) {
+                    return handle.clone();
+                }
+            }
+
+            for path in AppRegistry::icon_candidates(Some(name), size) {
+                if let Some(handle) = load_icon_handle(&path, size) {
+                    debug!("icon '{name}' -> {}", path.display());
+                    self.icon_cache
+                        .borrow_mut()
+                        .insert(name.clone(), Some(handle.clone()));
+                    return Some(handle);
+                }
+            }
+
+            debug!("no usable icon found for '{name}'");
+            self.icon_cache.borrow_mut().insert(name.clone(), None);
         }
 
-        debug!("no usable icon found for '{icon_name}'");
         None
     }
 

@@ -125,8 +125,30 @@ impl AppRegistry {
         let requested = u16::try_from(size).unwrap_or(u16::MAX);
         let sizes = [requested, 128, 96, 64, 48, 32, 24, 512, 256];
 
+        // Base names to try. Many app icons ship under a stripped or lowercased
+        // filename — especially those absent from the icon theme (reverse-DNS
+        // ids, Flatpak apps, pixmap-only icons).
+        let mut bases: Vec<String> = Vec::new();
+        let push_base = |bases: &mut Vec<String>, s: &str| {
+            if !s.is_empty() && !bases.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                bases.push(s.to_string());
+            }
+        };
+        push_base(&mut bases, name);
+        push_base(&mut bases, &name.to_lowercase());
+        // Reverse-DNS / Flatpak style ids (org.vendor.App, org.vendor.app_appid):
+        // try each dot-component and the leading segment of a `vendor_app` part.
+        for comp in name.split('.') {
+            push_base(&mut bases, comp);
+            push_base(&mut bases, &comp.to_lowercase());
+            if let Some(u) = comp.find('_') {
+                push_base(&mut bases, &comp[..u]);
+                push_base(&mut bases, &comp[..u].to_lowercase());
+            }
+        }
+
         let mut out: Vec<PathBuf> = Vec::new();
-        let mut push_unique = |p: PathBuf| {
+        let push_unique = |out: &mut Vec<PathBuf>, p: PathBuf| {
             if p.is_file() && !out.contains(&p) {
                 out.push(p);
             }
@@ -137,44 +159,82 @@ impl AppRegistry {
             .chain(std::iter::once("hicolor".to_string()))
             .collect();
 
-        for theme_name in &themes {
+        // 1) Theme-indexed lookup — fast and correct for themed icons.
+        for base in &bases {
+            for theme_name in &themes {
+                for s in sizes {
+                    if let Some(p) = freedesktop_icons::lookup(base)
+                        .with_theme(theme_name)
+                        .with_size(s)
+                        .find()
+                    {
+                        push_unique(&mut out, p);
+                    }
+                }
+            }
             for s in sizes {
-                if let Some(p) = freedesktop_icons::lookup(name)
-                    .with_theme(theme_name)
-                    .with_size(s)
-                    .find()
-                {
-                    push_unique(p);
+                if let Some(p) = freedesktop_icons::lookup(base).with_size(s).find() {
+                    push_unique(&mut out, p);
                 }
             }
         }
 
-        for s in sizes {
-            if let Some(p) = freedesktop_icons::lookup(name).with_size(s).find() {
-                push_unique(p);
-            }
+        // A themed icon was already resolved; no need to walk the filesystem.
+        if !out.is_empty() {
+            return out;
         }
 
-        const EXTENSIONS: [&str; 2] = ["png", "svg"];
-        let mut dirs: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
+        // 2) Direct filesystem scan — covers icons present on disk but missing
+        //    from the theme index (pixmaps, or a theme's apps/ tree).
+        const EXTENSIONS: [&str; 4] = ["png", "svg", "jpg", "xpm"];
+        let mut roots: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
             .map(|v| {
                 std::env::split_paths(&v)
-                    .map(|d| d.join("pixmaps"))
-                    .collect()
+                    .flat_map(|d| [d.join("icons"), d.join("pixmaps")])
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        dirs.push(PathBuf::from("/usr/share/pixmaps"));
-        dirs.push(
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(".local/share/pixmaps"),
-        );
-        for dir in dirs {
-            for ext in EXTENSIONS {
-                let p = dir.join(format!("{name}.{ext}"));
-                if p.is_file() {
-                    push_unique(p);
+        roots.push(PathBuf::from("/usr/share/icons"));
+        roots.push(PathBuf::from("/usr/share/pixmaps"));
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            roots.push(home.join(".local/share/icons"));
+            roots.push(home.join(".local/share/pixmaps"));
+            roots.push(home.join(".icons"));
+        }
+
+        let subdirs = ["apps", "scalable/apps"];
+        for root in &roots {
+            for theme in &themes {
+                for s in sizes {
+                    let dir = root.join(theme).join(format!("{s}x{s}")).join("apps");
+                    for base in &bases {
+                        for ext in EXTENSIONS {
+                            let p = dir.join(format!("{base}.{ext}"));
+                            if p.is_file() {
+                                push_unique(&mut out, p);
+                            }
+                        }
+                    }
+                }
+                for sub in subdirs {
+                    let dir = root.join(theme).join(sub);
+                    for base in &bases {
+                        for ext in EXTENSIONS {
+                            let p = dir.join(format!("{base}.{ext}"));
+                            if p.is_file() {
+                                push_unique(&mut out, p);
+                            }
+                        }
+                    }
+                }
+            }
+            for base in &bases {
+                for ext in EXTENSIONS {
+                    let p = root.join(format!("{base}.{ext}"));
+                    if p.is_file() {
+                        push_unique(&mut out, p);
+                    }
                 }
             }
         }
