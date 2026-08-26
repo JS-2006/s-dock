@@ -574,13 +574,13 @@ impl App {
             None => return row![].into(),
         }
 
-        // A hidden popup dock renders nothing (its input region is cleared).
-        if self.is_popup() && !self.popup_visible {
-            return row![].into();
-        }
+        // A hidden popup dock keeps rendering its (transparent) skeleton:
+        // a surface that never presents frames stays unmapped and never
+        // receives pointer input, breaking the strip reveal.
 
         let appearance = use_theme(|a| a.clone());
         let launcher = self.config.launcher.clone();
+        let revealed = !self.is_popup() || self.popup_visible;
 
         // --- Launcher button ---
         let launcher_button = launcher.enabled.then(|| {
@@ -617,7 +617,12 @@ impl App {
 
         children.extend(trailing);
 
-        let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
+        let content: Element<'_, Message> = if revealed {
+            row(children).spacing(appearance.spacing).into()
+        } else {
+            row![].into()
+        };
+        let alpha = if revealed { 1.0 } else { 0.0 };
 
         let thickness = appearance.dock_size as f32;
 
@@ -637,11 +642,11 @@ impl App {
             .style(move |theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(color_from_hex(
                     appearance.background_color,
-                    appearance.opacity,
+                    appearance.opacity * alpha,
                 ))),
                 border: iced::Border {
-                    color: color_from_hex(appearance.border_color, appearance.opacity),
-                    width: 1.0,
+                    color: color_from_hex(appearance.border_color, appearance.opacity * alpha),
+                    width: if revealed { 1.0 } else { 0.0 },
                     radius: (appearance.border_radius).into(),
                 },
                 text_color: Some(theme.palette().text),
@@ -675,11 +680,19 @@ impl App {
         }
     }
 
-    /// Transparent hotspot strip: hovering it reveals the dock.
+    /// Transparent hotspot strip: hovering it reveals the dock. It always
+    /// paints a fully-transparent frame so the surface stays mapped and
+    /// keeps receiving pointer input.
     fn strip_view(&self) -> Element<'_, Message> {
-        mouse_area(container(row![]).width(Length::Fill).height(Length::Fill))
-            .on_enter(Message::StripEntered)
-            .into()
+        let body = container(row![])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+                ..Default::default()
+            });
+
+        mouse_area(body).on_enter(Message::StripEntered).into()
     }
 
     fn app_icon_handle(&self, group: &AppGroup) -> Option<image::Handle> {
