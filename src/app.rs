@@ -8,7 +8,7 @@ use iced::{
     time,
     widget::{button, column, container, image, mouse_area, row, text},
 };
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 
 use crate::{
     config,
@@ -33,8 +33,8 @@ pub struct App {
     window_popup: Option<WindowPopup>,
     /// Guards stale delayed popup-close tasks.
     popup_close_generation: u64,
-    /// icon name → resolved path cache
-    icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
+    /// icon name → loaded image handle cache (stable ids => no atlas churn)
+    icon_cache: RefCell<HashMap<String, Option<image::Handle>>>,
     /// Popup mode: whether the (global) dock is currently shown.
     popup_visible: bool,
     /// Guards stale auto-hide timers.
@@ -299,6 +299,10 @@ impl App {
                     debug!("strip re-enter ignored");
                     self.strip_disarmed = false;
                     Task::none()
+                } else if self.popup_visible {
+                    // Dipping into the strip band while the dock is shown
+                    // must NOT reset the auto-hide timer.
+                    Task::none()
                 } else {
                     self.on_dock_entered()
                 }
@@ -404,7 +408,7 @@ impl App {
             }
         }
 
-        debug!(
+        trace!(
             "input regions synced: visible={} docks+strips updated",
             self.popup_visible
         );
@@ -682,21 +686,30 @@ impl App {
         let icon_name = group.app.as_ref()?.icon.clone()?;
         let size = use_theme(|a| a.icon_size.max(48));
 
-        {
-            let cache = self.icon_cache.borrow_mut();
-            if let Some(Some(p)) = cache.get(&icon_name) {
-                return Some(image::Handle::from_path(p));
-            }
+        let cached = self
+            .icon_cache
+            .borrow_mut()
+            .get(&icon_name)
+            .cloned()
+            .flatten();
+        if let Some(handle) = cached {
+            return Some(handle);
         }
 
         // Failures are not cached: a theme/icon install should recover.
-        let resolved = AppRegistry::icon_path(Some(&icon_name), size);
-        if resolved.is_some() {
-            self.icon_cache
-                .borrow_mut()
-                .insert(icon_name, resolved.clone());
+        match AppRegistry::icon_path(Some(&icon_name), size) {
+            Some(path) => {
+                let handle = image::Handle::from_path(path);
+                self.icon_cache
+                    .borrow_mut()
+                    .insert(icon_name.clone(), Some(handle.clone()));
+                Some(handle)
+            }
+            None => {
+                debug!("no icon found for '{icon_name}'");
+                None
+            }
         }
-        resolved.as_ref().map(image::Handle::from_path)
     }
 
     fn running_dots(
