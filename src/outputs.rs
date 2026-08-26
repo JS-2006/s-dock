@@ -30,6 +30,8 @@ pub struct Outputs {
     surfaces: Vec<OutputDock>,
     /// Current fallback surface; `SurfaceId::MAIN` until replaced.
     fallback: Option<SurfaceId>,
+    /// At most one window-list popup at a time.
+    window_popup: Option<(SurfaceId, Option<OutputId>)>,
 }
 
 /// Which surface a given `SurfaceId` refers to.
@@ -37,12 +39,16 @@ pub struct Outputs {
 pub enum SurfaceKind {
     Dock,
     Strip,
+    WindowList,
 }
 
 impl Outputs {
     pub fn kind(&self, id: SurfaceId) -> Option<SurfaceKind> {
         if self.fallback == Some(id) {
             return Some(SurfaceKind::Dock);
+        }
+        if self.window_popup.iter().any(|(pid, _)| *pid == id) {
+            return Some(SurfaceKind::WindowList);
         }
         for s in &self.surfaces {
             if s.dock_id == id {
@@ -53,6 +59,39 @@ impl Outputs {
             }
         }
         None
+    }
+
+    /// Output bound to a dock/strip surface (fallback returns `None`).
+    pub fn output_for_surface(&self, id: SurfaceId) -> Option<OutputId> {
+        self.surfaces
+            .iter()
+            .find(|s| s.dock_id == id || s.strip_id == Some(id))
+            .map(|s| s.output_id)
+    }
+
+    pub fn create_window_popup(
+        &mut self,
+        config: &Config,
+        output_id: Option<OutputId>,
+        entries: u32,
+    ) -> (SurfaceId, Task<()>) {
+        let (id, task) = new_layer_surface(window_list_settings(config, output_id, entries));
+        info!("Created window-list popup {id:?}");
+
+        let previous = self.window_popup.replace((id, output_id));
+        let close_old = previous
+            .map(|(old, _)| destroy_layer_surface(old))
+            .unwrap_or_else(Task::none);
+
+        let chained = close_old.chain(task);
+        (id, chained)
+    }
+
+    pub fn close_window_popup(&mut self) -> Task<()> {
+        match self.window_popup.take() {
+            Some((id, _)) => destroy_layer_surface(id),
+            None => Task::none(),
+        }
     }
 
     pub fn dock_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
@@ -119,6 +158,9 @@ impl Outputs {
             .collect();
 
         let mut tasks: Vec<Task<()>> = Vec::new();
+        if let Some((popup, _)) = self.window_popup.take() {
+            tasks.push(destroy_layer_surface(popup));
+        }
         for s in self.surfaces.drain(..) {
             tasks.push(destroy_layer_surface(s.dock_id));
             if let Some(strip) = s.strip_id {
@@ -142,6 +184,12 @@ impl Outputs {
         let mut tasks = vec![destroy_layer_surface(surface.dock_id)];
         if let Some(strip) = surface.strip_id {
             tasks.push(destroy_layer_surface(strip));
+        }
+        if let Some((popup, owner)) = self.window_popup
+            && owner.is_some_and(|owner| owner == output_id)
+        {
+            tasks.push(destroy_layer_surface(popup));
+            self.window_popup = None;
         }
         let destroy_task = Task::batch(tasks);
 
@@ -282,6 +330,51 @@ pub fn strip_layer_settings(config: &Config, output: Option<OutputId>) -> LayerS
             layer: Layer::Overlay,
             exclusive_zone: -1,
             size: Some((w, h)),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            output,
+        }
+    })
+}
+
+/// Layer-shell settings for the window-list popup: floats above the dock on
+/// the same output, aligned with it.
+pub fn window_list_settings(
+    config: &Config,
+    output: Option<OutputId>,
+    entries: u32,
+) -> LayerShellSettings {
+    use_theme(|appearance| {
+        const ENTRY_H: u32 = 44;
+        const PAD: u32 = 8;
+        const WIDTH: u32 = 360;
+        const MAX_VISIBLE: u32 = 8;
+
+        let horizontal = config.position.is_horizontal();
+        let visible = entries.clamp(1, MAX_VISIBLE);
+        let (w, h) = if horizontal {
+            (WIDTH, visible * ENTRY_H + PAD * 2)
+        } else {
+            // Vertical dock: popup sits beside the dock, keep width modest.
+            (WIDTH, visible * ENTRY_H + PAD * 2)
+        };
+
+        let lift = appearance.dock_size as i32
+            + appearance.margin * 2
+            + config.popup.hotspot_height as i32;
+        let margin = match config.position {
+            Position::Bottom => (0, appearance.margin, lift, appearance.margin),
+            Position::Top => (lift, appearance.margin, 0, appearance.margin),
+            Position::Left => (appearance.margin, lift, appearance.margin, 0),
+            Position::Right => (appearance.margin, 0, appearance.margin, lift),
+        };
+
+        LayerShellSettings {
+            namespace: "s-dock-winlist".into(),
+            anchor: dock_anchor(config.position, config.alignment, false),
+            layer: Layer::Overlay,
+            exclusive_zone: -1,
+            size: Some((w, h)),
+            margin,
             keyboard_interactivity: KeyboardInteractivity::None,
             output,
         }

@@ -28,6 +28,8 @@ pub struct App {
     registry: AppRegistry,
     windows: DockWindows,
     pins: state::Pins,
+    /// Open "multiple windows" popup, if any.
+    window_popup: Option<WindowPopup>,
     /// icon name → resolved path cache
     icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
     /// Popup mode: whether the dock is currently shown.
@@ -43,12 +45,19 @@ pub enum Message {
     WindowsReady(DockWindows),
     WindowsUpdated(DockWindows),
     PinsChanged(state::Pins),
-    IconClicked(String),
+    IconClicked(SurfaceId, String),
+    WindowClicked(String),
+    CloseWindowPopup,
     LaunchLauncher,
     DockEntered,
     DockLeft,
     AutoHideElapsed(u64),
     None,
+}
+
+struct WindowPopup {
+    group_key: String,
+    windows: Vec<compositor::WindowInfo>,
 }
 
 /// A dock entry: one application slot (grouped by resolved desktop id or,
@@ -69,6 +78,7 @@ impl App {
             outputs: Outputs::default(),
             registry: AppRegistry::load(),
             windows: DockWindows::default(),
+            window_popup: None,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
             popup_visible: false,
@@ -112,6 +122,17 @@ impl App {
             }
             Message::WindowsUpdated(windows) => {
                 self.windows = windows;
+
+                // Close the popup when none of its windows remain.
+                if let Some(popup) = &self.window_popup {
+                    let alive = popup
+                        .windows
+                        .iter()
+                        .any(|w| self.windows.windows.iter().any(|x| x.address == w.address));
+                    if !alive {
+                        return self.close_window_popup().map(|_| Message::None);
+                    }
+                }
                 Task::none()
             }
             Message::PinsChanged(pins) => {
@@ -119,7 +140,13 @@ impl App {
                 self.pins = pins;
                 Task::none()
             }
-            Message::IconClicked(key) => self.on_icon_clicked(key),
+            Message::IconClicked(surface, key) => self.on_icon_clicked(surface, key),
+            Message::WindowClicked(address) => {
+                let address2 = address.clone();
+                tokio::spawn(async move { focus_window(&address2).await });
+                self.close_window_popup().map(|_| Message::None)
+            }
+            Message::CloseWindowPopup => self.close_window_popup().map(|_| Message::None),
             Message::LaunchLauncher => {
                 let cmd = self.config.launcher.cmd.clone();
                 if !cmd.is_empty() {
@@ -206,10 +233,38 @@ impl App {
         Task::batch(tasks)
     }
 
-    fn on_icon_clicked(&mut self, key: String) -> Task<Message> {
+    fn on_icon_clicked(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
         let Some(group) = self.groups().into_iter().find(|g| g.key == key) else {
             return Task::none();
         };
+
+        // Several windows: toggle the window-list popup instead of focusing.
+        if group.windows.len() > 1 {
+            let already_open = self
+                .window_popup
+                .as_ref()
+                .is_some_and(|p| p.group_key == key);
+            let close = self.close_window_popup();
+
+            if already_open {
+                return close.map(|_| Message::None);
+            }
+
+            let output_id = self.outputs.output_for_surface(surface);
+            let (id, task) = self.outputs.create_window_popup(
+                &self.config,
+                output_id,
+                group.windows.len() as u32,
+            );
+
+            let _ = id;
+            self.window_popup = Some(WindowPopup {
+                group_key: key,
+                windows: group.windows.clone(),
+            });
+
+            return close.chain(task).map(|_| Message::None);
+        }
 
         if let Some(target) = pick_focus_target(&group.windows, &self.windows.active) {
             let address = target.address.clone();
@@ -225,6 +280,11 @@ impl App {
         }
 
         Task::none()
+    }
+
+    fn close_window_popup(&mut self) -> Task<()> {
+        self.window_popup = None;
+        self.outputs.close_window_popup()
     }
 
     fn groups(&self) -> Vec<AppGroup> {
@@ -288,6 +348,7 @@ impl App {
     pub fn view(&self, id: SurfaceId) -> Element<'_, Message> {
         match self.outputs.kind(id) {
             Some(SurfaceKind::Strip) => return self.strip_view(),
+            Some(SurfaceKind::WindowList) => return self.window_list_view(id),
             Some(SurfaceKind::Dock) => {}
             None => return row![].into(),
         }
@@ -330,7 +391,7 @@ impl App {
 
         // --- Application icons ---
         for group in self.groups() {
-            children.push(self.app_button(&group));
+            children.push(self.app_button(&group, id));
         }
 
         children.extend(trailing);
@@ -378,15 +439,55 @@ impl App {
         let icon_name = group.app.as_ref()?.icon.clone()?;
         let size = use_theme(|a| a.icon_size.max(48));
 
-        let mut cache = self.icon_cache.borrow_mut();
-        cache
-            .entry(icon_name.clone())
-            .or_insert_with(|| AppRegistry::icon_path(Some(&icon_name), size))
-            .as_ref()
-            .map(image::Handle::from_path)
+        {
+            let cache = self.icon_cache.borrow_mut();
+            if let Some(Some(p)) = cache.get(&icon_name) {
+                return Some(image::Handle::from_path(p));
+            }
+        }
+
+        // Failures are not cached: a theme/icon install should recover.
+        let resolved = AppRegistry::icon_path(Some(&icon_name), size);
+        if resolved.is_some() {
+            self.icon_cache
+                .borrow_mut()
+                .insert(icon_name, resolved.clone());
+        }
+        resolved.as_ref().map(image::Handle::from_path)
     }
 
-    fn app_button(&self, group: &AppGroup) -> Element<'_, Message> {
+    fn running_dots(
+        &self,
+        count: usize,
+        appearance: &config::AppearanceConfig,
+    ) -> Option<Element<'_, Message>> {
+        (appearance.show_running_indicator && count > 0).then(|| {
+            let size = appearance.running_indicator_size;
+            let color = color_from_hex(appearance.running_indicator_color, 1.0);
+            let n = count.clamp(1, 10);
+
+            let dots: Vec<Element<'_, Message>> = (0..n)
+                .map(|_| {
+                    container(row![])
+                        .width(Length::Fixed(size))
+                        .height(Length::Fixed(size))
+                        .style(move |_theme: &iced::Theme| container::Style {
+                            background: Some(iced::Background::Color(color)),
+                            border: iced::Border {
+                                radius: (size / 2.0).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .into()
+                })
+                .collect();
+
+            row(dots).spacing(3.0).into()
+        })
+    }
+
+    fn app_button(&self, group: &AppGroup, surface: SurfaceId) -> Element<'_, Message> {
         let appearance = use_theme(|a| a.clone());
         let border_radius = appearance.border_radius;
         let icon_size = appearance.icon_size as f32;
@@ -409,25 +510,10 @@ impl App {
             .into(),
         };
 
-        let dot = (!group.windows.is_empty() && appearance.show_running_indicator).then(|| {
-            let size = appearance.running_indicator_size;
-            let color = color_from_hex(appearance.running_indicator_color, 1.0);
-            container(row![])
-                .width(Length::Fixed(size))
-                .height(Length::Fixed(size))
-                .style(move |_theme: &iced::Theme| container::Style {
-                    background: Some(iced::Background::Color(color)),
-                    border: iced::Border {
-                        radius: (size / 2.0).into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-        });
-
-        let inner: Element<'_, Message> = match dot {
-            Some(dot) => column![icon_element, dot]
-                .spacing(2.0)
+        let inner: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance)
+        {
+            Some(dots) => column![icon_element, dots]
+                .spacing(3.0)
                 .align_x(iced::Alignment::Center)
                 .into(),
             None => icon_element,
@@ -440,7 +526,65 @@ impl App {
                 ..Default::default()
             })
             .padding(2.0)
-            .on_press(Message::IconClicked(group.key.clone()))
+            .on_press(Message::IconClicked(surface, group.key.clone()))
+            .into()
+    }
+
+    /// List of the group's open windows; clicking an entry focuses it.
+    fn window_list_view(&self, id: SurfaceId) -> Element<'_, Message> {
+        let Some(_popup) = self.window_popup.as_ref() else {
+            return row![].into();
+        };
+        let _ = id;
+
+        let appearance = use_theme(|a| a.clone());
+        let radius = appearance.border_radius;
+        let bg = color_from_hex(appearance.background_color, appearance.opacity);
+        let border_col = color_from_hex(appearance.border_color, 1.0);
+
+        let rows: Vec<Element<'_, Message>> = self
+            .window_popup
+            .as_ref()
+            .map(|p| {
+                p.windows
+                    .iter()
+                    .map(|w| {
+                        let title = truncate(&w.title, 48);
+                        button(
+                            row![text("\u{25aa}").size(10.0), text(title).size(14.0)]
+                                .spacing(8.0)
+                                .align_y(iced::Alignment::Center),
+                        )
+                        .style(move |_: &iced::Theme, status| button::Style {
+                            background: matches!(status, iced::widget::button::Status::Hovered)
+                                .then(|| iced::Background::Color(bg_hover(bg))),
+                            border: iced::Border::default().rounded(radius),
+                            ..Default::default()
+                        })
+                        .width(Length::Fill)
+                        .padding([6.0, 8.0])
+                        .on_press(Message::WindowClicked(w.address.clone()))
+                        .into()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let content =
+            container(column(rows).spacing(4.0))
+                .padding(8.0)
+                .style(move |_theme: &iced::Theme| container::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: border_col,
+                        width: 1.0,
+                        radius: (radius).into(),
+                    },
+                    ..Default::default()
+                });
+
+        mouse_area(content.width(Length::Fill).height(Length::Shrink))
+            .on_exit(Message::CloseWindowPopup)
             .into()
     }
 
@@ -492,6 +636,26 @@ async fn focus_window(address: &str) {
 
     if let Err(e) = result {
         log::error!("Failed to focus window {address}: {e}");
+    }
+}
+
+fn bg_hover(base: iced::Color) -> iced::Color {
+    iced::Color {
+        a: base.a * 0.35,
+        ..base
+    }
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!(
+            "{}\u{2026}",
+            s.chars()
+                .take(max_chars.saturating_sub(1))
+                .collect::<String>()
+        )
     }
 }
 

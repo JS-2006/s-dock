@@ -113,20 +113,71 @@ impl AppRegistry {
         self.index.get(&key).map(|&i| &self.apps[i])
     }
 
-    /// Resolves an icon name to a file path on disk.
+    /// Resolves an icon to a file path on disk.
+    ///
+    /// Resolution order: absolute path from `Icon=`, themed lookup over a
+    /// ladder of common sizes, unthemed lookup, legacy `pixmaps` dirs.
     pub fn icon_path(icon: Option<&str>, size: u32) -> Option<PathBuf> {
-        let size = u16::try_from(size).unwrap_or(u16::MAX);
         let name = icon?;
+        let requested = u16::try_from(size).unwrap_or(u16::MAX);
 
-        if let Some(path) = linicon_theme::get_icon_theme().and_then(|theme| {
-            freedesktop_icons::lookup(name)
-                .with_theme(&theme)
-                .with_size(size)
-                .find()
-        }) {
-            return Some(path);
+        // Some .desktop files point straight at a file.
+        if name.starts_with('/') {
+            let p = PathBuf::from(name);
+            return p.is_file().then_some(p);
         }
 
-        freedesktop_icons::lookup(name).with_size(size).find()
+        let sizes = [requested, 128, 96, 64, 48, 64 * 2, 32, 24, 512, 256];
+
+        let theme = linicon_theme::get_icon_theme();
+
+        for theme_name in theme.iter() {
+            for s in sizes {
+                if let Some(path) = freedesktop_icons::lookup(name)
+                    .with_theme(theme_name)
+                    .with_size(s)
+                    .find()
+                {
+                    return Some(path);
+                }
+            }
+        }
+
+        for s in sizes {
+            if let Some(path) = freedesktop_icons::lookup(name).with_size(s).find() {
+                return Some(path);
+            }
+        }
+
+        pixmap_fallback(name)
     }
+}
+
+/// Legacy lookup in `<data-dir>/pixmaps` for apps whose icons never made it
+/// into an icon theme.
+fn pixmap_fallback(name: &str) -> Option<PathBuf> {
+    const EXTENSIONS: [&str; 2] = ["png", "svg"];
+
+    let mut dirs: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
+        .map(|v| {
+            std::env::split_paths(&v)
+                .map(|d| d.join("pixmaps"))
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.push(PathBuf::from("/usr/share/pixmaps"));
+    dirs.push(
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".local/share/pixmaps"),
+    );
+
+    dirs.into_iter()
+        .flat_map(|dir| {
+            EXTENSIONS
+                .iter()
+                .map(move |ext| dir.join(format!("{name}.{ext}")))
+        })
+        .find(|p| p.is_file())
 }
