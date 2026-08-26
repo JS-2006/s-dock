@@ -42,6 +42,8 @@ pub struct App {
     hide_generation: u64,
     /// Active drag: (surface, group key).
     drag: Option<(SurfaceId, String)>,
+    /// True once the drag crossed another pin: release must not click.
+    drag_moved: bool,
     /// Group key currently under the cursor.
     hovered: Option<String>,
 }
@@ -115,6 +117,7 @@ impl App {
             popup_visible: false,
             hide_generation: 0,
             drag: None,
+            drag_moved: false,
             hovered: None,
         }
     }
@@ -235,6 +238,7 @@ impl App {
             }
             Message::DragStart(surface, key) => {
                 self.drag = Some((surface, key));
+                self.drag_moved = false;
                 Task::none()
             }
             Message::DragRelease(surface, key) => {
@@ -242,6 +246,13 @@ impl App {
                 if !was_dragging {
                     return Task::none();
                 }
+
+                // Pure reorder (the drag crossed other pins): no click.
+                if self.drag_moved {
+                    debug!("drag ended after reorder — no click");
+                    return Task::none();
+                }
+
                 // Released without leaving the button: it's a click.
                 self.on_icon_clicked(surface, key)
             }
@@ -251,10 +262,14 @@ impl App {
                 // Live reorder while dragging a pinned app over another pin.
                 if let Some((_, drag_key)) = self.drag.clone()
                     && drag_key != key
-                    && drag_key.ends_with(".desktop")
-                    && key.ends_with(".desktop")
                 {
-                    self.pins.move_before(&drag_key, &key);
+                    // Crossing another icon marks this as a real drag:
+                    // releasing now must not launch/focus anything.
+                    self.drag_moved = true;
+
+                    if drag_key.ends_with(".desktop") && key.ends_with(".desktop") {
+                        self.pins.move_onto(&drag_key, &key);
+                    }
                 }
                 Task::none()
             }

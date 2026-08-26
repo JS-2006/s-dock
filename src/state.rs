@@ -63,18 +63,32 @@ impl Pins {
         self.ids.iter().any(|i| i == id)
     }
 
-    /// Moves `id` to the position of `before_id` (drag-and-drop reorder).
-    pub fn move_before(&mut self, id: &str, before_id: &str) -> bool {
+    /// Moves `id` onto `onto_id`'s slot (drag-and-drop reorder).
+    ///
+    /// Direction-aware: dragging right lands the item AFTER the hovered
+    /// pin, dragging left — BEFORE it (standard dock behaviour).
+    pub fn move_onto(&mut self, id: &str, onto_id: &str) -> bool {
         let Some(from) = self.ids.iter().position(|i| i == id) else {
             return false;
         };
+        let Some(to_old) = self.ids.iter().position(|i| i == onto_id) else {
+            return false;
+        };
+        if from == to_old {
+            return false;
+        }
+
         let entry = self.ids.remove(from);
-        let target = self
+        let to_new = self
             .ids
             .iter()
-            .position(|i| i == before_id)
+            .position(|i| i == onto_id)
             .unwrap_or(self.ids.len());
-        self.ids.insert(target, entry);
+        // Rightward move (dragged was before the target): after removing it
+        // the target shifted left, so drop the item one slot AFTER it.
+        let insert_at = if from < to_old { to_new + 1 } else { to_new };
+        let insert_at = insert_at.min(self.ids.len());
+        self.ids.insert(insert_at, entry);
         self.save()
     }
 
