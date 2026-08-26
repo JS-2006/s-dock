@@ -113,87 +113,87 @@ impl AppRegistry {
         self.index.get(&key).map(|&i| &self.apps[i])
     }
 
-    /// Resolves an icon to a file path on disk.
+    /// Resolves all plausible icon files for this icon name, best first.
     ///
-    /// Resolution order: absolute path from `Icon=`, themed lookup over a
-    /// ladder of common sizes, unthemed lookup, legacy `pixmaps` dirs.
-    pub fn icon_path(icon: Option<&str>, size: u32) -> Option<PathBuf> {
-        let name = icon?;
-        let requested = u16::try_from(size).unwrap_or(u16::MAX);
+    /// Order: absolute path from `Icon=`, themed lookup over a ladder of
+    /// common sizes, explicit `hicolor`, unthemed lookup, legacy `pixmaps`.
+    pub fn icon_candidates(icon: Option<&str>, size: u32) -> Vec<PathBuf> {
+        let Some(name) = icon else { return Vec::new() };
 
         // Some .desktop files point straight at a file.
         if name.starts_with('/') {
             let p = PathBuf::from(name);
-            return p.is_file().then_some(p);
+            return if p.is_file() { vec![p] } else { Vec::new() };
         }
 
-        let sizes = [requested, 128, 96, 64, 48, 64 * 2, 32, 24, 512, 256];
+        let requested = u16::try_from(size).unwrap_or(u16::MAX);
+        let sizes = [requested, 128, 96, 64, 48, 32, 24, 512, 256];
 
-        let theme = linicon_theme::get_icon_theme();
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut push_unique = |p: PathBuf| {
+            if p.is_file() && !out.contains(&p) {
+                out.push(p);
+            }
+        };
 
-        for theme_name in theme.iter() {
+        let themes: Vec<String> = linicon_theme::get_icon_theme()
+            .into_iter()
+            .chain(std::iter::once("hicolor".to_string()))
+            .collect();
+
+        for theme_name in &themes {
             for s in sizes {
-                if let Some(path) = freedesktop_icons::lookup(name)
+                if let Some(p) = freedesktop_icons::lookup(name)
                     .with_theme(theme_name)
                     .with_size(s)
                     .find()
                 {
-                    return Some(path);
+                    push_unique(p);
                 }
             }
         }
 
-        // Explicit hicolor pass (fallback theme every spec-compliant setup has).
         for s in sizes {
-            if let Some(path) = freedesktop_icons::lookup(name)
-                .with_theme("hicolor")
-                .with_size(s)
-                .find()
-            {
-                return Some(path);
+            if let Some(p) = freedesktop_icons::lookup(name).with_size(s).find() {
+                push_unique(p);
             }
         }
 
-        for s in sizes {
-            if let Some(path) = freedesktop_icons::lookup(name).with_size(s).find() {
-                return Some(path);
+        // Legacy pixmaps dirs.
+        const EXTENSIONS: [&str; 2] = ["png", "svg"];
+        let mut dirs: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
+            .map(|v| {
+                std::env::split_paths(&v)
+                    .map(|d| d.join("pixmaps"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.push(PathBuf::from("/usr/share/pixmaps"));
+        dirs.push(
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".local/share/pixmaps"),
+        );
+        for dir in dirs {
+            for ext in EXTENSIONS {
+                let p = dir.join(format!("{name}.{ext}"));
+                if p.is_file() {
+                    push_unique(p);
+                }
             }
         }
 
-        // Any size at all (e.g. scalable-only icons outside the theme).
-        if let Some(path) = freedesktop_icons::lookup(name).find() {
-            return Some(path);
-        }
-
-        pixmap_fallback(name)
+        // XPM cannot be decoded by the renderer: drop it unless nothing else.
+        let (decodable, rest): (Vec<_>, Vec<_>) = out.into_iter().partition(|p| {
+            matches!(
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tiff" | "tif" | "svg")
+            )
+        });
+        decodable.into_iter().chain(rest).collect()
     }
-}
-
-/// Legacy lookup in `<data-dir>/pixmaps` for apps whose icons never made it
-/// into an icon theme.
-fn pixmap_fallback(name: &str) -> Option<PathBuf> {
-    const EXTENSIONS: [&str; 2] = ["png", "svg"];
-
-    let mut dirs: Vec<PathBuf> = std::env::var_os("XDG_DATA_DIRS")
-        .map(|v| {
-            std::env::split_paths(&v)
-                .map(|d| d.join("pixmaps"))
-                .collect()
-        })
-        .unwrap_or_default();
-    dirs.push(PathBuf::from("/usr/share/pixmaps"));
-    dirs.push(
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(".local/share/pixmaps"),
-    );
-
-    dirs.into_iter()
-        .flat_map(|dir| {
-            EXTENSIONS
-                .iter()
-                .map(move |ext| dir.join(format!("{name}.{ext}")))
-        })
-        .find(|p| p.is_file())
 }

@@ -10,7 +10,8 @@ rust-version = "1.89"
 lto = "thin"
 strip = true
 opt-level = 3
-panic = "abort"
+# A panic must not take down the whole shell bar.
+panic = "unwind"
 
 [dependencies]
 iced = { package = "iced_layershell", git = "https://github.com/MalpenZibo/iced_layershell", tag = "v0.1.5", default-features = false, features = [
@@ -42,6 +43,7 @@ freedesktop-icons = "0.4"
 linicon-theme = "1.2.0"
 shellexpand = { version = "3", features = ["path"] }
 freedesktop-desktop-entry = "0.8.1"
+image = "0.25"
 
 # Without this patch tiny-skia renders through softbuffer WITHOUT an alpha
 # channel: anything not drawn by a widget becomes opaque black, and

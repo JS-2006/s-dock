@@ -1,3 +1,4 @@
+use ::image as image_crate;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -709,20 +710,20 @@ impl App {
             return Some(handle);
         }
 
-        // Failures are not cached: a theme/icon install should recover.
-        match AppRegistry::icon_path(Some(&icon_name), size) {
-            Some(path) => {
-                let handle = image::Handle::from_path(path);
+        // Try every candidate until one decodes; never cache failures so a
+        // later theme/icon install recovers.
+        for path in AppRegistry::icon_candidates(Some(&icon_name), size) {
+            if let Some(handle) = load_icon_handle(&path) {
+                debug!("icon '{icon_name}' -> {}", path.display());
                 self.icon_cache
                     .borrow_mut()
-                    .insert(icon_name.clone(), Some(handle.clone()));
-                Some(handle)
-            }
-            None => {
-                debug!("no icon found for '{icon_name}'");
-                None
+                    .insert(icon_name, Some(handle.clone()));
+                return Some(handle);
             }
         }
+
+        debug!("no usable icon found for '{icon_name}'");
+        None
     }
 
     fn running_dots(
@@ -1039,6 +1040,29 @@ fn truncate(s: &str, max_chars: usize) -> String {
                 .collect::<String>()
         )
     }
+}
+
+/// Decodes an icon file into a premade RGBA handle. SVGs are passed through
+/// to the svg renderer; anything that fails to decode returns `None` instead
+/// of panicking the renderer.
+fn load_icon_handle(path: &PathBuf) -> Option<image::Handle> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if ext == "svg" {
+        return Some(image::Handle::from_path(path));
+    }
+
+    let bytes = std::fs::read(path).ok()?;
+    let img = image_crate::load_from_memory(&bytes).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(image::Handle::from_rgba(w, h, img.into_rgba8().into_raw()))
 }
 
 fn color_from_hex(hex: hex_color::HexColor, opacity: f32) -> iced::Color {
