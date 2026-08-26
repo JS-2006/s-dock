@@ -7,7 +7,7 @@ use iced::{
     Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
     widget::{button, column, container, image, mouse_area, row, text},
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::{
     config,
@@ -30,8 +30,12 @@ pub struct App {
     pins: state::Pins,
     /// Open "multiple windows" popup, if any.
     window_popup: Option<WindowPopup>,
+    /// Last content size pushed to Fit-mode dock surfaces.
+    applied_fit_size: Option<(u32, u32)>,
+    /// Guards stale delayed popup-close tasks.
+    popup_close_generation: u64,
     /// icon name → resolved path cache
-    icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
+    icon_cache: RefCell<HashMap<String, Option<image::Handle>>>,
     /// Popup mode: whether the dock is currently shown.
     popup_visible: bool,
     /// Guards stale auto-hide timers.
@@ -51,6 +55,8 @@ pub enum Message {
     PinsChanged(state::Pins),
     WindowClicked(String),
     CloseWindowPopup,
+    PopupEntered,
+    CloseWindowPopupElapsed(u64),
     ContextMenuRequested(SurfaceId, String),
     DragStart(SurfaceId, String),
     DragRelease(SurfaceId, String),
@@ -102,6 +108,8 @@ impl App {
             registry: AppRegistry::load(),
             windows: DockWindows::default(),
             window_popup: None,
+            applied_fit_size: None,
+            popup_close_generation: 0,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
             popup_visible: false,
@@ -120,18 +128,16 @@ impl App {
 
                 // Geometry-affecting options require fresh surfaces.
                 let recreate = self.outputs.recreate_all(&self.config);
-                let regions = self.apply_input_regions();
 
-                recreate.map(|_| Message::None).chain(regions)
+                recreate.map(|_| Message::None).chain(self.refresh())
             }
             Message::OutputEvent(event) => match event {
                 OutputEvent::Added(info) => {
                     let create = self
                         .outputs
                         .create(&self.config, info.name.clone(), info.id);
-                    let regions = self.apply_input_regions();
 
-                    create.map(|_| Message::None).chain(regions)
+                    create.map(|_| Message::None).chain(self.refresh())
                 }
                 OutputEvent::Removed(output_id) => self
                     .outputs
@@ -141,9 +147,9 @@ impl App {
             },
             Message::WindowsReady(windows) => {
                 self.windows = windows;
-                // First service tick after startup: enforce the initial
-                // (hidden) popup input regions.
-                self.apply_input_regions()
+                // First service tick after startup: enforce hidden regions
+                // and push the initial fit size.
+                self.refresh()
             }
             Message::WindowsUpdated(windows) => {
                 self.windows = windows;
@@ -158,7 +164,8 @@ impl App {
                         return self.close_window_popup().map(|_| Message::None);
                     }
                 }
-                Task::none()
+
+                self.refresh()
             }
             Message::PinsChanged(pins) => {
                 info!("Pins reloaded");
@@ -170,7 +177,26 @@ impl App {
                 tokio::spawn(async move { focus_window(&address2).await });
                 self.close_window_popup().map(|_| Message::None)
             }
-            Message::CloseWindowPopup => self.close_window_popup().map(|_| Message::None),
+            Message::CloseWindowPopup => {
+                // Small delay so crossing the gap between the popup and the
+                // dock doesn't slam the menu shut.
+                self.popup_close_generation += 1;
+                let generation = self.popup_close_generation;
+                Task::perform(
+                    async move { tokio::time::sleep(Duration::from_millis(250)).await },
+                    move |_| Message::CloseWindowPopupElapsed(generation),
+                )
+            }
+            Message::PopupEntered => {
+                self.popup_close_generation += 1;
+                Task::none()
+            }
+            Message::CloseWindowPopupElapsed(generation) => {
+                if self.popup_close_generation == generation && self.window_popup.is_some() {
+                    return self.close_window_popup().map(|_| Message::None);
+                }
+                Task::none()
+            }
             Message::ContextMenuRequested(surface, key) => self.open_context_menu(surface, key),
             Message::MenuTogglePin(key) => {
                 if key.ends_with(".desktop") {
@@ -337,6 +363,27 @@ impl App {
         }
 
         Task::batch(tasks)
+    }
+
+    /// Regions + Fit-size sync; call after state that affects them changes.
+    fn refresh(&mut self) -> Task<Message> {
+        let regions = self.apply_input_regions();
+        let size_sync = self.sync_fit_size();
+        regions.chain(size_sync)
+    }
+
+    fn sync_fit_size(&mut self) -> Task<Message> {
+        if self.config.appearance.width != config::WidthMode::Fit {
+            return Task::none();
+        }
+        let children = self.groups().len() + usize::from(self.config.launcher.enabled);
+        let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, children));
+        if Some(size) == self.applied_fit_size {
+            return Task::none();
+        }
+        debug!("fit size -> {:?}", size);
+        self.applied_fit_size = Some(size);
+        self.outputs.apply_fit_size(size).map(|_| Message::None)
     }
 
     fn on_icon_clicked(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
@@ -565,20 +612,19 @@ impl App {
 
         // Horizontal docks have hover headroom in the surface: pin the visual
         // dock to its screen edge so icons overflow toward open space.
-        let dock: Element<'_, Message> =
-            if self.config.position.is_horizontal() {
-                let align_y = match self.config.position {
-                    config::Position::Top => iced::alignment::Vertical::Top,
-                    _ => iced::alignment::Vertical::Bottom,
-                };
-                container(dock)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_y(align_y)
-                    .into()
-            } else {
-                dock
+        let dock: Element<'_, Message> = if self.config.position.is_horizontal() {
+            let align_y = match self.config.position {
+                config::Position::Top => iced::alignment::Vertical::Top,
+                _ => iced::alignment::Vertical::Bottom,
             };
+            container(dock)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(align_y)
+                .into()
+        } else {
+            dock
+        };
 
         if self.is_popup() {
             mouse_area(dock)
@@ -603,19 +649,24 @@ impl App {
 
         {
             let cache = self.icon_cache.borrow_mut();
-            if let Some(Some(p)) = cache.get(&icon_name) {
-                return Some(image::Handle::from_path(p));
+            if let Some(handle) = cache.get(&icon_name) {
+                return handle.clone();
             }
         }
 
         // Failures are not cached: a theme/icon install should recover.
-        let resolved = AppRegistry::icon_path(Some(&icon_name), size);
-        if resolved.is_some() {
-            self.icon_cache
-                .borrow_mut()
-                .insert(icon_name, resolved.clone());
+        for path in AppRegistry::icon_candidates(Some(&icon_name), size) {
+            if let Some(handle) = load_icon_handle(&path, size) {
+                debug!("icon '{icon_name}' -> {}", path.display());
+                self.icon_cache
+                    .borrow_mut()
+                    .insert(icon_name, Some(handle.clone()));
+                return Some(handle);
+            }
         }
-        resolved.as_ref().map(image::Handle::from_path)
+
+        debug!("no usable icon found for '{icon_name}'");
+        None
     }
 
     fn running_dots(
@@ -653,7 +704,8 @@ impl App {
         let appearance = use_theme(|a| a.clone());
         let border_radius = appearance.border_radius;
         let icon_size = appearance.icon_size as f32;
-        let hovered = self.hovered.as_deref() == Some(group.key.as_str());
+        let key = group.key.clone();
+        let hovered = self.hovered.as_deref() == Some(key.as_str());
         let scale = if hovered {
             appearance.hover_scale.max(1.0)
         } else {
@@ -673,7 +725,7 @@ impl App {
                     .app
                     .as_ref()
                     .map(|a| a.name.chars().next().unwrap_or('?'))
-                    .unwrap_or_else(|| group.key.chars().next().unwrap_or('?')),
+                    .unwrap_or_else(|| key.chars().next().unwrap_or('?')),
             )
             .size(scaled * 0.7)
             .into(),
@@ -688,37 +740,35 @@ impl App {
         };
         let box_h = icon_size * appearance.hover_scale.max(1.0) + dots_h;
 
-        let inner: Element<'_, Message> = {
-            let col: Element<'_, Message> =
-                match self.running_dots(group.windows.len(), &appearance) {
-                    Some(dots) => column![icon_element, dots]
-                        .spacing(3.0)
-                        .align_x(iced::Alignment::Center)
-                        .into(),
-                    None => icon_element,
-                };
-            container(col)
-                .width(Length::Fixed(box_w))
-                .height(Length::Fixed(box_h))
+        let col: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance) {
+            Some(dots) => column![icon_element, dots]
+                .spacing(3.0)
                 .align_x(iced::Alignment::Center)
-                .align_y(iced::Alignment::End)
-                .into()
+                .into(),
+            None => icon_element,
         };
 
-        let btn = button(inner)
-            .style(move |_theme: &iced::Theme, _status| button::Style {
-                background: None,
+        // NOTE: intentionally NOT a `button` widget — an iced Button captures
+        // left-presses even without handlers, starving the wrapping
+        // MouseArea. This container is purely visual.
+        let body = container(col)
+            .width(Length::Fixed(box_w))
+            .height(Length::Fixed(box_h))
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::End)
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: hovered
+                    .then(|| iced::Background::Color(iced::Color::from_rgba8(255, 255, 255, 0.10))),
                 border: iced::Border::default().rounded(border_radius),
                 ..Default::default()
-            })
-            .padding(0.0);
+            });
 
-        mouse_area(btn)
-            .on_press(Message::DragStart(surface, group.key.clone()))
-            .on_release(Message::DragRelease(surface, group.key.clone()))
-            .on_enter(Message::AppHover(group.key.clone()))
-            .on_exit(Message::AppUnhover(group.key.clone()))
-            .on_right_press(Message::ContextMenuRequested(surface, group.key.clone()))
+        mouse_area(body)
+            .on_press(Message::DragStart(surface, key.clone()))
+            .on_release(Message::DragRelease(surface, key.clone()))
+            .on_enter(Message::AppHover(key.clone()))
+            .on_exit(Message::AppUnhover(key.clone()))
+            .on_right_press(Message::ContextMenuRequested(surface, key))
             .into()
     }
 
@@ -742,13 +792,13 @@ impl App {
             }
             PopupKind::AppMenu => {
                 let key = popup.group_key.clone();
-                let pin_label = if popup.pinned {
-                    "Открепить"
-                } else {
-                    "Закрепить"
-                };
 
-                if key.ends_with(".desktop") || !popup.pinned {
+                if key.ends_with(".desktop") {
+                    let pin_label = if popup.pinned {
+                        "Открепить"
+                    } else {
+                        "Закрепить"
+                    };
                     rows.push(self.menu_row(pin_label, Message::MenuTogglePin(key.clone())));
                 }
                 if popup.can_launch {
@@ -776,6 +826,7 @@ impl App {
                 });
 
         mouse_area(content.width(Length::Fill).height(Length::Shrink))
+            .on_enter(Message::PopupEntered)
             .on_exit(Message::CloseWindowPopup)
             .into()
     }
@@ -924,6 +975,45 @@ fn truncate(s: &str, max_chars: usize) -> String {
                 .collect::<String>()
         )
     }
+}
+
+/// Decodes an icon file into a premade RGBA handle. SVGs are rasterized via
+/// resvg — they must not reach the raster decoder.
+fn load_icon_handle(path: &PathBuf, size_px: u32) -> Option<image::Handle> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if ext == "svg" {
+        let bytes = std::fs::read(path).ok()?;
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(&bytes, &opt).ok()?;
+
+        let svg_size = tree.size();
+        let scale = (size_px as f32 / svg_size.width()).max(0.1);
+        let (w, h) = (
+            (svg_size.width() * scale).round().max(1.0) as u32,
+            (svg_size.height() * scale).round().max(1.0) as u32,
+        );
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        return Some(image::Handle::from_rgba(w, h, pixmap.take()));
+    }
+
+    let bytes = std::fs::read(path).ok()?;
+    let img = ::image::load_from_memory(&bytes).ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(image::Handle::from_rgba(w, h, img.into_rgba8().into_raw()))
 }
 
 fn color_from_hex(hex: hex_color::HexColor, opacity: f32) -> iced::Color {

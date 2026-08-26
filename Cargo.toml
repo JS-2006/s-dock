@@ -41,3 +41,5 @@ freedesktop-icons = "0.4"
 linicon-theme = "1.2.0"
 shellexpand = { version = "3", features = ["path"] }
 freedesktop-desktop-entry = "0.8.1"
+resvg = "0.45"
+image = "0.25"

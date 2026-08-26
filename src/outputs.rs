@@ -9,7 +9,7 @@
 
 use iced::{
     Anchor, KeyboardInteractivity, Layer, LayerShellSettings, OutputId, SurfaceId, Task,
-    destroy_layer_surface, new_layer_surface,
+    destroy_layer_surface, new_layer_surface, set_size,
 };
 use log::info;
 
@@ -102,6 +102,15 @@ impl Outputs {
 
     pub fn strip_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
         self.surfaces.iter().filter_map(|s| s.strip_id)
+    }
+
+    /// Pushes the content-derived size to every dock surface (Fit mode).
+    pub fn apply_fit_size(&self, size: (u32, u32)) -> Task<()> {
+        Task::batch(
+            self.dock_ids()
+                .map(|id| set_size::<()>(id, size))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn destroy_fallback(&mut self) -> Task<()> {
@@ -379,4 +388,37 @@ pub fn window_list_settings(
             output,
         }
     })
+}
+
+/// Content-derived dock size for `Fit` mode.
+///
+/// Hover scale expands the icon visually (slight overlap); the layout slot
+/// stays one icon wide so the dock is compact.
+pub fn fit_content_size(
+    config: &Config,
+    appearance: &crate::config::AppearanceConfig,
+    children: usize,
+) -> (u32, u32) {
+    let horizontal = config.position.is_horizontal();
+    let thickness = appearance.dock_size;
+    let headroom = if horizontal {
+        ((appearance.hover_scale - 1.0).max(0.0) * appearance.icon_size as f32) as u32
+    } else {
+        0
+    };
+
+    let radius_pad = appearance.border_radius as u32 * 2;
+    let slot = appearance.icon_size + 8;
+    let spacing = appearance.spacing as u32;
+    let n = children.max(1) as u32;
+
+    let launcher = u32::from(config.launcher.enabled);
+    let items = n + launcher;
+    let row = radius_pad + items * slot + items.saturating_sub(1) * spacing;
+
+    if horizontal {
+        (row, thickness + headroom)
+    } else {
+        (thickness, row + headroom)
+    }
 }
