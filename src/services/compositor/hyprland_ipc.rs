@@ -15,9 +15,11 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::OnceCell;
+use tokio::time::sleep;
 
 /// Which dispatch dialect the running compositor understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,15 +42,51 @@ fn socket_path() -> Result<PathBuf> {
 }
 
 /// Sends a raw request and returns the compositor's response.
+///
+/// Retries transient socket errors: Hyprland services IPC synchronously and
+/// can briefly refuse or reset a connection under load (e.g. right as a
+/// window starts closing), which otherwise surfaces as a "failed writing to
+/// the Hyprland IPC socket" error.
 async fn send_request(request: &str) -> Result<String> {
     let path = socket_path()?;
-    let mut stream = UnixStream::connect(&path).await.with_context(|| {
-        format!(
-            "failed to connect to the Hyprland IPC socket at {}",
-            path.display()
-        )
-    })?;
+    let mut last_err: Option<anyhow::Error> = None;
 
+    for _ in 0..3 {
+        let mut stream = match UnixStream::connect(&path).await {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = Some(
+                    anyhow::anyhow!(e).context("failed connecting to the Hyprland IPC socket"),
+                );
+                sleep(Duration::from_millis(40)).await;
+                continue;
+            }
+        };
+
+        if let Err(e) = write_request(&mut stream, request).await {
+            last_err = Some(e);
+            sleep(Duration::from_millis(40)).await;
+            continue;
+        }
+
+        let mut response = String::new();
+        match stream.read_to_string(&mut response).await {
+            Ok(_) => return Ok(response),
+            Err(e) => {
+                last_err =
+                    Some(anyhow::anyhow!(e).context("failed reading from the Hyprland IPC socket"));
+                sleep(Duration::from_millis(40)).await;
+                continue;
+            }
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("failed communicating with the Hyprland IPC socket")))
+}
+
+/// Writes the request line (plus trailing newline) to the socket.
+async fn write_request(stream: &mut UnixStream, request: &str) -> Result<()> {
     stream
         .write_all(request.as_bytes())
         .await
@@ -57,14 +95,7 @@ async fn send_request(request: &str) -> Result<String> {
         .write_all(b"\n")
         .await
         .context("failed writing to the Hyprland IPC socket")?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .await
-        .context("failed reading from the Hyprland IPC socket")?;
-
-    Ok(response)
+    Ok(())
 }
 
 /// Sends a request and maps error-looking responses into `Err`.
