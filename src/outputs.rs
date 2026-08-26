@@ -32,6 +32,10 @@ pub struct Outputs {
     fallback: Option<SurfaceId>,
     /// At most one window-list popup at a time.
     window_popup: Option<(SurfaceId, Option<OutputId>)>,
+    /// Last Fit-mode size; applied to any surface created after it was set
+    /// (surfaces may appear after `sync_fit_size` ran, so caching alone would
+    /// leave them at the default size until the next resize).
+    fit_size: Option<(u32, u32)>,
 }
 
 /// Which surface a given `SurfaceId` refers to.
@@ -105,7 +109,8 @@ impl Outputs {
     }
 
     /// Pushes the content-derived size to every dock surface (Fit mode).
-    pub fn apply_fit_size(&self, size: (u32, u32)) -> Task<()> {
+    pub fn apply_fit_size(&mut self, size: (u32, u32)) -> Task<()> {
+        self.fit_size = Some(size);
         Task::batch(
             self.dock_ids()
                 .map(|id| set_size::<()>(id, size))
@@ -125,6 +130,14 @@ impl Outputs {
     pub fn create(&mut self, config: &Config, name: String, output_id: OutputId) -> Task<()> {
         let (dock_id, task) = new_layer_surface(dock_layer_settings(config, Some(output_id)));
         info!("Created dock surface {dock_id:?} for output {name}");
+
+        // Apply the last known Fit size immediately; the surface may have been
+        // created after `sync_fit_size` ran, and the cached size would otherwise
+        // never reach it.
+        let size_task = match self.fit_size {
+            Some(size) => set_size::<()>(dock_id, size),
+            None => Task::none(),
+        };
 
         let strip_task = if config.mode == Mode::Popup {
             let (strip_id, task) = new_layer_surface(strip_layer_settings(config, Some(output_id)));
@@ -155,6 +168,7 @@ impl Outputs {
         }
         .chain(task)
         .chain(strip_task)
+        .chain(size_task)
     }
 
     /// Destroys every per-output surface, keeping the fallback alive, and
