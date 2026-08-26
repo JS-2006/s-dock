@@ -10,7 +10,9 @@ use hyprland::{
 use iced::{Subscription, futures::SinkExt, stream::channel};
 use log::{debug, error};
 use std::any::TypeId;
-use tokio::sync::{OnceCell, broadcast};
+use std::time::Duration;
+use tokio::sync::{OnceCell, broadcast, mpsc};
+use tokio::time::sleep;
 
 /// Snapshot of the windows currently known to the compositor.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -59,19 +61,37 @@ async fn broadcaster_event_loop(tx: broadcast::Sender<Message>) {
 
     let mut listener = AsyncEventListener::new();
 
+    // Coalesce rapid compositor events into a single throttled refetch.
+    // Querying `/clients` mid-operation (e.g. during a drag, focus flurry or
+    // workspace switch) can transiently yield a partial snapshot; debouncing
+    // waits until the burst settles so we only ever read a consistent state,
+    // and it also cuts IPC load on chatty events like `window_moved`.
+    let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
+    {
+        let fetch_tx = tx.clone();
+        tokio::spawn(async move {
+            while refresh_rx.recv().await.is_some() {
+                // Drain any further events that arrived in the same burst.
+                while refresh_rx.try_recv().is_ok() {}
+                sleep(Duration::from_millis(80)).await;
+                match fetch_windows() {
+                    Ok(windows) => {
+                        let _ = fetch_tx.send(Message::Updated(windows));
+                    }
+                    Err(e) => error!("Failed to refresh window list: {e}"),
+                }
+            }
+        });
+    }
+
     macro_rules! add_refresh_handler {
         ($method:ident) => {
             listener.$method({
-                let tx = tx.clone();
+                let tx = refresh_tx.clone();
                 move |_| {
                     let tx = tx.clone();
                     Box::pin(async move {
-                        match fetch_windows() {
-                            Ok(windows) => {
-                                let _ = tx.send(Message::Updated(windows));
-                            }
-                            Err(e) => error!("Failed to refresh window list: {e}"),
-                        }
+                        let _ = tx.send(());
                     })
                 }
             });
