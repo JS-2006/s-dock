@@ -2,7 +2,8 @@ use log::info;
 use std::path::PathBuf;
 
 use iced::{
-    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, widget::row,
+    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events,
+    widget::{button, row, text},
 };
 
 use crate::{config, outputs::Outputs, theme::use_theme};
@@ -17,6 +18,7 @@ pub struct App {
 pub enum Message {
     ConfigChanged(Box<config::Config>),
     OutputEvent(OutputEvent),
+    LaunchLauncher,
     None,
 }
 
@@ -53,6 +55,13 @@ impl App {
                 OutputEvent::InfoChanged(_) => Task::none(),
             },
             Message::None => Task::none(),
+            Message::LaunchLauncher => {
+                let cmd = self.config.launcher.cmd.clone();
+                if !cmd.is_empty() {
+                    tokio::spawn(async move { crate::utils::launcher::execute(cmd).await });
+                }
+                Task::none()
+            }
         }
     }
 
@@ -63,7 +72,41 @@ impl App {
 
         let appearance = use_theme(|a| a.clone());
 
-        let content: Element<'_, Message> = row![].into();
+        let launcher = self.config.launcher.clone();
+
+        let launcher_button = launcher.enabled.then(|| {
+            let text_color = color_from_hex(launcher.text_color);
+            button(
+                text(launcher.label)
+                    .size(appearance.icon_size as f32)
+                    .width(Length::Fixed(appearance.icon_size as f32))
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .style(move |_, _status| iced::widget::button::Style {
+                background: None,
+                border: iced::Border::default().rounded(appearance.border_radius),
+                text_color,
+                ..Default::default()
+            })
+            .padding(0.0)
+            .on_press(Message::LaunchLauncher)
+            .into()
+        });
+
+        let (mut children, mut trailing): (Vec<Element<'_, Message>>, Vec<Element<'_, Message>>) =
+            (Vec::new(), Vec::new());
+        match launcher.position {
+            config::LauncherPosition::Start => {
+                children.extend(launcher_button);
+            }
+            config::LauncherPosition::End => {
+                trailing.extend(launcher_button);
+            }
+        }
+
+        children.extend(trailing);
+
+        let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
 
         iced::widget::container(content)
             .width(match appearance.width {

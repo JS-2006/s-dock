@@ -61,6 +61,15 @@ pub enum WidthMode {
     Full,
 }
 
+/// Where the launcher button sits inside the dock row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LauncherPosition {
+    #[default]
+    Start,
+    End,
+}
+
 /// Width of the popup-mode hotspot strip: either the same width as the dock
 /// (`"dock"`) or a fixed number of logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -113,6 +122,10 @@ fn default_border_color() -> hex_color::HexColor {
 
 fn default_running_indicator_color() -> hex_color::HexColor {
     hex_color::HexColor::parse("#89b4fa").unwrap()
+}
+
+fn default_launcher_text_color() -> hex_color::HexColor {
+    hex_color::HexColor::parse("#cdd6f4").unwrap()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +186,9 @@ pub struct LauncherConfig {
     pub enabled: bool,
     pub label: String,
     pub cmd: String,
+    /// Side of the dock row where the button is placed.
+    pub position: LauncherPosition,
+    pub text_color: hex_color::HexColor,
 }
 
 impl Default for LauncherConfig {
@@ -181,6 +197,8 @@ impl Default for LauncherConfig {
             enabled: true,
             label: "\u{1f680}".to_string(),
             cmd: String::new(),
+            position: LauncherPosition::Start,
+            text_color: default_launcher_text_color(),
         }
     }
 }

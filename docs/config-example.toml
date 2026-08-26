@@ -30,3 +30,5 @@ hotspot_height = 8
 enabled = true
 label = "🚀"                # эмодзи или текст
 cmd = ""                    # напр. "fuzzel"
+position = "start"          # start | end — где кнопка в ряду дока
+text_color = "#cdd6f4"

@@ -10,6 +10,7 @@ mod app;
 mod config;
 mod outputs;
 mod theme;
+mod utils;
 
 const TMP_FILE_SIZE: u64 = 10 * 1024 * 1024;
 

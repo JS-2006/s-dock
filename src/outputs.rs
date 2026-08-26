@@ -160,10 +160,16 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
         LayerShellSettings {
             namespace: "s-dock".into(),
             anchor: dock_anchor(config.position, config.alignment, stretch),
-            layer: Layer::Top,
+            // Popup floats above everything without shifting windows;
+            // Fixed sits in its own reserved strip below windows.
+            layer: match config.mode {
+                Mode::Fixed => Layer::Top,
+                Mode::Popup => Layer::Overlay,
+            },
             exclusive_zone: match config.mode {
                 Mode::Fixed => thickness as i32,
-                Mode::Popup => 0,
+                // -1 = ignore other surfaces' exclusive zones too.
+                Mode::Popup => -1,
             },
             size: Some((w, h)),
             keyboard_interactivity: KeyboardInteractivity::None,

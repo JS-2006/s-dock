@@ -6,7 +6,9 @@
 > и сделай коммит (коммиты на этом проекте согласованы с владельцем).
 > Не пересматривай утверждённые решения из SPEC.md.
 
-**Статус:** этапы 1 готов. Готово: 1/8 этапов. Следующая задача: 2.1.
+**Статус:** этап 1 готов (включая правки владельца). Готово: 1/8 этапов.
+Следующая задача: 2.1. Примечание: 3.3 (кнопка лаунчера) выполнена досрочно в 1.6 —
+в этапе 3 останется только привязка к состоянию, если понадобится.
 
 ## Global Constraints
 
@@ -84,8 +86,14 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
       anchor по position|alignment (center без stretch = без якоря на оси),
       exclusive_zone = dock_size при Fixed / 0 при Popup; width Full = растяжение,
       Fit = заглушка thickness*4; hot-reload пересоздаёт поверхности.
-- [x] 1.5 Проверка: `make check` зелёный. Визуальную проверку у владельца —
-      при следующем запуске. Коммит `feat: project scaffold with config and dock window`.
+- [x] 1.5 Проверка: `make check` зелёный; владелец подтвердил работу подложки.
+      Коммит `feat: project scaffold with config and dock window`.
+- [x] 1.6 Правки владельца после проверки: popup = Overlay + exclusive −1
+      (поверх окон, без сдвига), fixed = Top + exclusive dock_size;
+      кнопка лаунчера отрисована раньше срока (этап 3.3): позиция
+      `launcher.position = start|end`, цвет текста `launcher.text_color`,
+      клик запускает `launcher.cmd` через sh -c (utils/launcher.rs).
+      Коммит `feat(dock): launcher button and layer behavior per mode`.
 
 ## Этап 2. Приложения и окна Hyprland
 
