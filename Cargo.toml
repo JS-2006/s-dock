@@ -42,3 +42,10 @@ freedesktop-icons = "0.4"
 linicon-theme = "1.2.0"
 shellexpand = { version = "3", features = ["path"] }
 freedesktop-desktop-entry = "0.8.1"
+
+# Without this patch tiny-skia renders through softbuffer WITHOUT an alpha
+# channel: anything not drawn by a widget becomes opaque black, and
+# translucent dock backgrounds lose their transparency (copied from ashell-ru,
+# which hit the same problem).
+[patch.crates-io]
+softbuffer = { git = "https://github.com/MalpenZibo/softbuffer", branch = "wayland-argb" }
