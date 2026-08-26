@@ -248,6 +248,12 @@ impl App {
             Message::DragStart(surface, key) => {
                 debug!("DragStart {key} on {surface:?}");
                 self.drag = Some((surface, key));
+
+                // An open popup surface would otherwise swallow every click
+                // landing inside its rectangle.
+                if self.window_popup.is_some() {
+                    return self.close_window_popup().map(|_| Message::None);
+                }
                 Task::none()
             }
             Message::DragRelease(_surface, released_over) => {
@@ -515,7 +521,11 @@ impl App {
                 windows: group.windows.clone(),
             });
 
-            return close.chain(task).map(|_| Message::None);
+            let autoclose = self.schedule_popup_autoclose().map(|_| Message::None);
+            return close
+                .map(|_| Message::None)
+                .chain(task.map(|_| Message::None))
+                .chain(autoclose);
         }
 
         if let Some(target) = pick_focus_target(&group.windows, &self.windows.active) {
@@ -544,6 +554,16 @@ impl App {
         let mut tasks: Vec<Task<()>> = vec![self.outputs.close_window_popup()];
         tasks.push(self.on_dock_left().map(|_| ()));
         Task::batch(tasks)
+    }
+
+    /// Safety net: a forgotten popup must not block the dock forever.
+    fn schedule_popup_autoclose(&mut self) -> Task<Message> {
+        self.popup_close_generation += 1;
+        let generation = self.popup_close_generation;
+        Task::perform(
+            async move { tokio::time::sleep(Duration::from_secs(15)).await },
+            move |_| Message::CloseWindowPopupElapsed(generation),
+        )
     }
 
     fn open_context_menu(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
