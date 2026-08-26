@@ -114,7 +114,7 @@ impl App {
             popup_close_generation: 0,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
-            popup_visible: false,
+            popup_visible: std::env::var_os("S_DOCK_FORCE_VISIBLE").is_some(),
             hide_generation: 0,
             drag: None,
             drag_moved: false,
@@ -748,22 +748,26 @@ impl App {
 
         // Reserve the max footprint so neighbors never shift on hover.
         let box_w = icon_size * appearance.hover_scale.max(1.0);
-        let dots_h = if appearance.show_running_indicator {
-            appearance.running_indicator_size + 3.0
-        } else {
-            0.0
-        };
+        let show_dots = appearance.show_running_indicator;
+        let dot_h = appearance.running_indicator_size;
+        let dot_gap = if show_dots { 3.0 } else { 0.0 };
+        let dots_h = if show_dots { dot_h + dot_gap } else { 0.0 };
         let box_h = icon_size * appearance.hover_scale.max(1.0) + dots_h;
 
-        // Dots sit ABOVE the icon: with the button bottom-aligned, a scaled
-        // icon grows upward and pushes them along instead of clipping.
-        let col: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance) {
-            Some(dots) => column![dots, icon_element]
-                .spacing(3.0)
-                .align_x(iced::Alignment::Center)
-                .into(),
-            None => icon_element,
-        };
+        // Dots sit BELOW the icon at the panel's bottom edge. A fixed-height
+        // bottom zone (empty when the app isn't running) keeps every icon's
+        // baseline level, so icons without dots line up with those that have
+        // them instead of dropping to the bottom of the box.
+        let bottom_zone: Element<'_, Message> =
+            match self.running_dots(group.windows.len(), &appearance) {
+                Some(dots) => dots,
+                None => container(row![]).height(Length::Fixed(dot_h)).into(),
+            };
+
+        let col: Element<'_, Message> = column![icon_element, bottom_zone]
+            .spacing(dot_gap)
+            .align_x(iced::Alignment::Center)
+            .into();
 
         // NOTE: intentionally NOT a `button` widget — an iced Button captures
         // left-presses even without handlers, starving the wrapping
