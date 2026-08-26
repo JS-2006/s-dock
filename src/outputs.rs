@@ -101,15 +101,6 @@ impl Outputs {
             .map(|id| (id, None))
             .chain(self.surfaces.iter().map(|s| (s.dock_id, s.strip_id)))
     }
-
-    /// The dock surface sharing an output with the given strip.
-    pub fn dock_for_strip(&self, strip_id: SurfaceId) -> Option<SurfaceId> {
-        self.surfaces
-            .iter()
-            .find(|s| s.strip_id == Some(strip_id))
-            .map(|s| s.dock_id)
-    }
-
     fn destroy_fallback(&mut self) -> Task<()> {
         match self.fallback.take() {
             Some(id) => destroy_layer_surface(id),
