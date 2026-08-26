@@ -846,7 +846,8 @@ impl App {
         let appearance = use_theme(|a| a.clone());
         let border_radius = appearance.border_radius;
         let icon_size = appearance.icon_size as f32;
-        let hovered = self.hovered.as_deref() == Some(group.key.as_str());
+        let key = group.key.clone();
+        let hovered = self.hovered.as_deref() == Some(key.as_str());
         let scale = if hovered {
             appearance.hover_scale.max(1.0)
         } else {
@@ -866,7 +867,7 @@ impl App {
                     .app
                     .as_ref()
                     .map(|a| a.name.chars().next().unwrap_or('?'))
-                    .unwrap_or_else(|| group.key.chars().next().unwrap_or('?')),
+                    .unwrap_or_else(|| key.chars().next().unwrap_or('?')),
             )
             .size(scaled * 0.7)
             .into(),
@@ -881,37 +882,35 @@ impl App {
         };
         let box_h = icon_size * appearance.hover_scale.max(1.0) + dots_h;
 
-        let inner: Element<'_, Message> = {
-            let col: Element<'_, Message> =
-                match self.running_dots(group.windows.len(), &appearance) {
-                    Some(dots) => column![icon_element, dots]
-                        .spacing(3.0)
-                        .align_x(iced::Alignment::Center)
-                        .into(),
-                    None => icon_element,
-                };
-            container(col)
-                .width(Length::Fixed(box_w))
-                .height(Length::Fixed(box_h))
+        let col: Element<'_, Message> = match self.running_dots(group.windows.len(), &appearance) {
+            Some(dots) => column![icon_element, dots]
+                .spacing(3.0)
                 .align_x(iced::Alignment::Center)
-                .align_y(iced::Alignment::End)
-                .into()
+                .into(),
+            None => icon_element,
         };
 
-        let btn = button(inner)
-            .style(move |_theme: &iced::Theme, _status| button::Style {
-                background: None,
+        // NOTE: intentionally NOT a `button` widget — an iced Button captures
+        // left-presses even without handlers, starving the wrapping
+        // MouseArea. The container below is purely visual.
+        let body = container(col)
+            .width(Length::Fixed(box_w))
+            .height(Length::Fixed(box_h))
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::End)
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: hovered
+                    .then(|| iced::Background::Color(iced::Color::from_rgba8(255, 255, 255, 0.10))),
                 border: iced::Border::default().rounded(border_radius),
                 ..Default::default()
-            })
-            .padding(0.0);
+            });
 
-        mouse_area(btn)
-            .on_press(Message::DragStart(surface, group.key.clone()))
-            .on_release(Message::DragRelease(surface, group.key.clone()))
-            .on_enter(Message::AppHover(group.key.clone()))
-            .on_exit(Message::AppUnhover(group.key.clone()))
-            .on_right_press(Message::ContextMenuRequested(surface, group.key.clone()))
+        mouse_area(body)
+            .on_press(Message::DragStart(surface, key.clone()))
+            .on_release(Message::DragRelease(surface, key.clone()))
+            .on_enter(Message::AppHover(key.clone()))
+            .on_exit(Message::AppUnhover(key.clone()))
+            .on_right_press(Message::ContextMenuRequested(surface, key))
             .into()
     }
 
