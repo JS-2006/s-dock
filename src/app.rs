@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::{
-    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
-    time,
+    Element, InputRegionRect, Length, OutputEvent, Subscription, SurfaceId, Task, output_events,
+    set_input_region, time,
     widget::{button, column, container, image, mouse_area, row, text},
 };
 use log::{debug, info, trace, warn};
@@ -47,6 +47,8 @@ pub struct App {
     drag: Option<(SurfaceId, String)>,
     /// Group key currently under the cursor.
     hovered: Option<String>,
+    /// Last content size pushed to Fit-mode dock surfaces.
+    applied_fit_size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +123,7 @@ impl App {
             strip_disarmed: false,
             drag: None,
             hovered: None,
+            applied_fit_size: None,
         }
     }
 
@@ -134,18 +137,16 @@ impl App {
 
                 // Geometry-affecting options require fresh surfaces.
                 let recreate = self.outputs.recreate_all(&self.config);
-                let regions = self.apply_input_regions();
 
-                recreate.map(|_| Message::None).chain(regions)
+                recreate.map(|_| Message::None).chain(self.refresh())
             }
             Message::OutputEvent(event) => match event {
                 OutputEvent::Added(info) => {
                     let create = self
                         .outputs
                         .create(&self.config, info.name.clone(), info.id);
-                    let regions = self.apply_input_regions();
 
-                    create.map(|_| Message::None).chain(regions)
+                    create.map(|_| Message::None).chain(self.refresh())
                 }
                 OutputEvent::Removed(output_id) => self
                     .outputs
@@ -155,9 +156,8 @@ impl App {
             },
             Message::WindowsReady(windows) => {
                 self.windows = windows;
-                // First service tick after startup: enforce the initial
-                // (hidden) popup input regions.
-                self.apply_input_regions()
+                // First tick after startup: enforce hidden regions + fit size.
+                self.refresh()
             }
             Message::WindowsUpdated(windows) => {
                 debug!(
@@ -250,14 +250,14 @@ impl App {
                 self.drag = Some((surface, key));
                 Task::none()
             }
-            Message::DragRelease(surface, key) => {
-                debug!("DragRelease {key}");
-                let was_dragging = self.drag.take().is_some_and(|(_, k)| k == key);
-                if !was_dragging {
+            Message::DragRelease(_surface, released_over) => {
+                trace!("DragRelease over {released_over}");
+                // Release anywhere on an app button completes a click for the
+                // drag origin (guards against spacing-gap releases).
+                let Some((origin_surface, origin_key)) = self.drag.take() else {
                     return Task::none();
-                }
-                // Released without leaving the button: it's a click.
-                self.on_icon_clicked(surface, key)
+                };
+                self.on_icon_clicked(origin_surface, origin_key)
             }
             Message::AppHover(key) => {
                 self.hovered = Some(key.clone());
@@ -337,7 +337,7 @@ impl App {
                     return Task::none();
                 }
                 self.start_hide();
-                self.apply_input_regions()
+                self.refresh()
             }
             Message::None => Task::none(),
         }
@@ -356,7 +356,7 @@ impl App {
 
         if !self.popup_visible {
             self.popup_visible = true;
-            self.apply_input_regions()
+            self.refresh()
         } else {
             Task::none()
         }
@@ -383,19 +383,60 @@ impl App {
     fn start_hide(&mut self) {
         self.popup_visible = false;
         self.strip_disarmed = true;
-        let _ = self.apply_input_regions();
+        let _ = self.refresh();
     }
 
-    /// Syncs pointer input regions with popup visibility: when hidden the
-    /// dock must not intercept clicks while strips catch hover; when visible
-    /// it's the opposite.
+    /// Syncs pointer input regions with popup visibility.
+    ///
+    /// Hidden: dock takes no input, strip catches hover everywhere.
+    /// Visible: dock takes input; only the part of the strip that does NOT
+    /// overlap the dock stays active, so brushing the dock's bottom pixels
+    /// doesn't cancel the auto-hide timer.
     fn apply_input_regions(&self) -> Task<Message> {
         if !self.is_popup() {
             return Task::none();
         }
 
+        let m = use_theme(|a| a.margin);
+        let hh = self.config.popup.hotspot_height as i32;
+        let overlap = hh.saturating_sub(m);
+        let big: i32 = 100_000;
+
         let dock_region = self.popup_visible.then(Vec::new);
-        let strip_region = (!self.popup_visible).then(Vec::new);
+        let strip_region = if !self.popup_visible {
+            None
+        } else if overlap == 0 {
+            Some(Vec::new())
+        } else {
+            use crate::config::Position;
+            let rect = match self.config.position {
+                Position::Bottom => InputRegionRect {
+                    x: 0,
+                    y: overlap,
+                    width: big,
+                    height: hh - overlap,
+                },
+                Position::Top => InputRegionRect {
+                    x: 0,
+                    y: 0,
+                    width: big,
+                    height: hh - overlap,
+                },
+                Position::Left => InputRegionRect {
+                    x: 0,
+                    y: 0,
+                    width: overlap,
+                    height: big,
+                },
+                Position::Right => InputRegionRect {
+                    x: overlap,
+                    y: 0,
+                    width: hh - overlap,
+                    height: big,
+                },
+            };
+            Some(vec![rect])
+        };
 
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for (dock_id, strip_id) in self.outputs.docks_with_strips() {
@@ -410,11 +451,35 @@ impl App {
         }
 
         trace!(
-            "input regions synced: visible={} docks+strips updated",
+            "input regions synced: visible={} overlap={overlap}",
             self.popup_visible
         );
 
         Task::batch(tasks)
+    }
+
+    /// Regions + Fit-size sync; call after any state that affects them.
+    fn refresh(&mut self) -> Task<Message> {
+        let regions = self.apply_input_regions();
+        let size_sync = self.sync_fit_size();
+        regions.chain(size_sync)
+    }
+
+    fn sync_fit_size(&mut self) -> Task<Message> {
+        if self.config.appearance.width != config::WidthMode::Fit {
+            return Task::none();
+        }
+
+        let children = self.groups().len() + usize::from(self.config.launcher.enabled);
+        let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, children));
+
+        if Some(size) == self.applied_fit_size {
+            return Task::none();
+        }
+        debug!("fit size -> {:?}", size);
+        self.applied_fit_size = Some(size);
+
+        self.outputs.apply_fit_size(size).map(|_| Message::None)
     }
 
     fn on_icon_clicked(&mut self, surface: SurfaceId, key: String) -> Task<Message> {

@@ -9,7 +9,7 @@
 
 use iced::{
     Anchor, KeyboardInteractivity, Layer, LayerShellSettings, OutputId, SurfaceId, Task,
-    destroy_layer_surface, new_layer_surface,
+    destroy_layer_surface, new_layer_surface, set_size,
 };
 use log::info;
 
@@ -92,6 +92,15 @@ impl Outputs {
             Some((id, _)) => destroy_layer_surface(id),
             None => Task::none(),
         }
+    }
+
+    /// Pushes the content-derived size to every dock surface (Fit mode).
+    pub fn apply_fit_size(&self, size: (u32, u32)) -> Task<()> {
+        Task::batch(
+            self.docks_with_strips()
+                .map(|(dock, _)| set_size::<()>(dock, size))
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// (dock surface, optional sibling strip) pairs, including the fallback.
@@ -376,4 +385,36 @@ pub fn window_list_settings(
             output,
         }
     })
+}
+
+/// Content-derived dock size for `Fit` mode (also used for the initial
+/// placeholder before the first sync).
+pub fn fit_content_size(
+    config: &Config,
+    appearance: &crate::config::AppearanceConfig,
+    children: usize,
+) -> (u32, u32) {
+    let horizontal = config.position.is_horizontal();
+    let thickness = appearance.dock_size;
+    let headroom = if horizontal {
+        ((appearance.hover_scale - 1.0).max(0.0) * appearance.icon_size as f32) as u32
+    } else {
+        0
+    };
+
+    let radius_pad = appearance.border_radius as u32 * 2;
+    let box_w = appearance.icon_size * 2; // icon_size * hover_scale, rounded up
+    let spacing = appearance.spacing as u32;
+    let n = children.max(1) as u32;
+
+    // launcher + app buttons + inter-item spacing
+    let launcher = u32::from(config.launcher.enabled);
+    let items = n + launcher;
+    let row = radius_pad + items * box_w + items.saturating_sub(1) * spacing;
+
+    if horizontal {
+        (row, thickness + headroom)
+    } else {
+        (thickness, row + headroom)
+    }
 }
