@@ -59,6 +59,10 @@ impl Pins {
         &self.ids
     }
 
+    pub fn contains(&self, id: &str) -> bool {
+        self.ids.iter().any(|i| i == id)
+    }
+
     /// Toggles a pin; newly pinned apps go last. Returns true if changed.
     #[allow(dead_code)]
     pub fn toggle(&mut self, id: &str) -> bool {

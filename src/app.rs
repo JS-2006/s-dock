@@ -48,6 +48,10 @@ pub enum Message {
     IconClicked(SurfaceId, String),
     WindowClicked(String),
     CloseWindowPopup,
+    ContextMenuRequested(SurfaceId, String),
+    MenuTogglePin(String),
+    MenuLaunch(String),
+    MenuCloseGroup(String),
     LaunchLauncher,
     DockEntered,
     DockLeft,
@@ -55,8 +59,19 @@ pub enum Message {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupKind {
+    WindowList,
+    AppMenu,
+}
+
 struct WindowPopup {
+    kind: PopupKind,
     group_key: String,
+    /// AppMenu only: whether the app is currently pinned.
+    pinned: bool,
+    /// AppMenu only: whether launching is possible.
+    can_launch: bool,
     windows: Vec<compositor::WindowInfo>,
 }
 
@@ -147,6 +162,35 @@ impl App {
                 self.close_window_popup().map(|_| Message::None)
             }
             Message::CloseWindowPopup => self.close_window_popup().map(|_| Message::None),
+            Message::ContextMenuRequested(surface, key) => self.open_context_menu(surface, key),
+            Message::MenuTogglePin(key) => {
+                if key.ends_with(".desktop") {
+                    self.pins.toggle(&key);
+                } else {
+                    warn!("Cannot pin '{key}': no matching .desktop entry");
+                }
+                self.close_window_popup().map(|_| Message::None)
+            }
+            Message::MenuLaunch(key) => {
+                if let Some(app) = self.groups().into_iter().find_map(|g| {
+                    (g.key == key)
+                        .then_some(g.app)
+                        .flatten()
+                        .filter(|a| !a.exec.is_empty())
+                }) {
+                    tokio::spawn(async move { launcher::execute(app.exec).await });
+                }
+                self.close_window_popup().map(|_| Message::None)
+            }
+            Message::MenuCloseGroup(key) => {
+                if let Some(group) = self.groups().into_iter().find(|g| g.key == key) {
+                    for w in group.windows {
+                        let address = w.address;
+                        tokio::spawn(async move { close_window(&address).await });
+                    }
+                }
+                self.close_window_popup().map(|_| Message::None)
+            }
             Message::LaunchLauncher => {
                 let cmd = self.config.launcher.cmd.clone();
                 if !cmd.is_empty() {
@@ -259,7 +303,10 @@ impl App {
 
             let _ = id;
             self.window_popup = Some(WindowPopup {
+                kind: PopupKind::WindowList,
                 group_key: key,
+                pinned: false,
+                can_launch: false,
                 windows: group.windows.clone(),
             });
 
@@ -285,6 +332,34 @@ impl App {
     fn close_window_popup(&mut self) -> Task<()> {
         self.window_popup = None;
         self.outputs.close_window_popup()
+    }
+
+    fn open_context_menu(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
+        let Some(group) = self.groups().into_iter().find(|g| g.key == key) else {
+            return Task::none();
+        };
+
+        let pinned = key.ends_with(".desktop") && self.pins.contains(&key);
+        let can_launch = group.app.as_ref().is_some_and(|a| !a.exec.is_empty());
+        let entries = 3 + usize::from(!group.windows.is_empty()) + group.windows.len();
+
+        let output_id = self.outputs.output_for_surface(surface);
+        // Replace an already-open popup (list or menu).
+        let close = self.close_window_popup();
+        let (id, task) = self
+            .outputs
+            .create_window_popup(&self.config, output_id, entries as u32);
+        let _ = id;
+
+        self.window_popup = Some(WindowPopup {
+            kind: PopupKind::AppMenu,
+            group_key: key,
+            pinned,
+            can_launch,
+            windows: group.windows,
+        });
+
+        close.chain(task).map(|_| Message::None)
     }
 
     fn groups(&self) -> Vec<AppGroup> {
@@ -519,20 +594,23 @@ impl App {
             None => icon_element,
         };
 
-        button(inner)
+        let btn = button(inner)
             .style(move |_theme: &iced::Theme, _status| button::Style {
                 background: None,
                 border: iced::Border::default().rounded(border_radius),
                 ..Default::default()
             })
             .padding(2.0)
-            .on_press(Message::IconClicked(surface, group.key.clone()))
+            .on_press(Message::IconClicked(surface, group.key.clone()));
+
+        mouse_area(btn)
+            .on_right_press(Message::ContextMenuRequested(surface, group.key.clone()))
             .into()
     }
 
-    /// List of the group's open windows; clicking an entry focuses it.
+    /// Popup content: either the plain window list or the app context menu.
     fn window_list_view(&self, id: SurfaceId) -> Element<'_, Message> {
-        let Some(_popup) = self.window_popup.as_ref() else {
+        let Some(popup) = self.window_popup.as_ref() else {
             return row![].into();
         };
         let _ = id;
@@ -542,33 +620,33 @@ impl App {
         let bg = color_from_hex(appearance.background_color, appearance.opacity);
         let border_col = color_from_hex(appearance.border_color, 1.0);
 
-        let rows: Vec<Element<'_, Message>> = self
-            .window_popup
-            .as_ref()
-            .map(|p| {
-                p.windows
-                    .iter()
-                    .map(|w| {
-                        let title = truncate(&w.title, 48);
-                        button(
-                            row![text("\u{25aa}").size(10.0), text(title).size(14.0)]
-                                .spacing(8.0)
-                                .align_y(iced::Alignment::Center),
-                        )
-                        .style(move |_: &iced::Theme, status| button::Style {
-                            background: matches!(status, iced::widget::button::Status::Hovered)
-                                .then(|| iced::Background::Color(bg_hover(bg))),
-                            border: iced::Border::default().rounded(radius),
-                            ..Default::default()
-                        })
-                        .width(Length::Fill)
-                        .padding([6.0, 8.0])
-                        .on_press(Message::WindowClicked(w.address.clone()))
-                        .into()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+
+        match popup.kind {
+            PopupKind::WindowList => {
+                rows.extend(popup.windows.iter().map(|w| self.window_row(w)));
+            }
+            PopupKind::AppMenu => {
+                let key = popup.group_key.clone();
+                let pin_label = if popup.pinned {
+                    "Открепить"
+                } else {
+                    "Закрепить"
+                };
+
+                if key.ends_with(".desktop") || !popup.pinned {
+                    rows.push(self.menu_row(pin_label, Message::MenuTogglePin(key.clone())));
+                }
+                if popup.can_launch {
+                    rows.push(self.menu_row("Открыть", Message::MenuLaunch(key.clone())));
+                }
+                if !popup.windows.is_empty() {
+                    rows.push(self.menu_row("Закрыть", Message::MenuCloseGroup(key)));
+                    rows.push(self.divider());
+                }
+                rows.extend(popup.windows.iter().map(|w| self.window_row(w)));
+            }
+        }
 
         let content =
             container(column(rows).spacing(4.0))
@@ -578,7 +656,7 @@ impl App {
                     border: iced::Border {
                         color: border_col,
                         width: 1.0,
-                        radius: (radius).into(),
+                        radius: radius.into(),
                     },
                     ..Default::default()
                 });
@@ -586,6 +664,60 @@ impl App {
         mouse_area(content.width(Length::Fill).height(Length::Shrink))
             .on_exit(Message::CloseWindowPopup)
             .into()
+    }
+
+    fn menu_row(&self, label: &str, msg: Message) -> Element<'_, Message> {
+        let radius = use_theme(|t| t.border_radius);
+        let hover_base = color_from_hex(use_theme(|t| t.background_color), 1.0);
+        button(text(label.to_string()).size(14.0))
+            .style(move |_: &iced::Theme, status| {
+                let bg = (status == iced::widget::button::Status::Hovered)
+                    .then(|| iced::Background::Color(bg_hover(hover_base)));
+                button::Style {
+                    background: bg,
+                    border: iced::Border::default().rounded(radius),
+                    ..Default::default()
+                }
+            })
+            .width(Length::Fill)
+            .padding([6.0, 8.0])
+            .on_press(msg)
+            .into()
+    }
+
+    fn divider(&self) -> Element<'_, Message> {
+        container(row![])
+            .height(Length::Fixed(1.0))
+            .width(Length::Fill)
+            .style(move |theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(theme.palette().text)),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn window_row(&self, w: &compositor::WindowInfo) -> Element<'_, Message> {
+        let radius = use_theme(|t| t.border_radius);
+        let hover_base = color_from_hex(use_theme(|t| t.background_color), 1.0);
+        let title = truncate(&w.title, 48);
+        button(
+            row![text("\u{25aa}").size(10.0), text(title).size(14.0)]
+                .spacing(8.0)
+                .align_y(iced::Alignment::Center),
+        )
+        .style(move |_: &iced::Theme, status| {
+            let bg = (status == iced::widget::button::Status::Hovered)
+                .then(|| iced::Background::Color(bg_hover(hover_base)));
+            button::Style {
+                background: bg,
+                border: iced::Border::default().rounded(radius),
+                ..Default::default()
+            }
+        })
+        .width(Length::Fill)
+        .padding([6.0, 8.0])
+        .on_press(Message::WindowClicked(w.address.clone()))
+        .into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -623,8 +755,9 @@ fn pick_focus_target<'a>(
 async fn focus_window(address: &str) {
     let result = match compositor::hyprland_ipc::dispatch_mode().await {
         compositor::hyprland_ipc::DispatchMode::Lua => {
+            // Lua window selectors use window-rules syntax: "address:0x...".
             compositor::hyprland_ipc::eval_dispatch(&format!(
-                "hl.dsp.focus({{ window = \"{address}\" }})"
+                "hl.dsp.focus({{ window = \"address:{address}\" }})"
             ))
             .await
         }
@@ -636,6 +769,26 @@ async fn focus_window(address: &str) {
 
     if let Err(e) = result {
         log::error!("Failed to focus window {address}: {e}");
+    }
+}
+
+/// Closes a single window by address.
+async fn close_window(address: &str) {
+    let result = match compositor::hyprland_ipc::dispatch_mode().await {
+        compositor::hyprland_ipc::DispatchMode::Lua => {
+            compositor::hyprland_ipc::eval_dispatch(&format!(
+                "hl.dsp.window.close(\"address:{address}\")"
+            ))
+            .await
+        }
+        compositor::hyprland_ipc::DispatchMode::Legacy => {
+            compositor::hyprland_ipc::legacy_dispatch(&format!("closewindow address:{address}"))
+                .await
+        }
+    };
+
+    if let Err(e) = result {
+        log::error!("Failed to close window {address}: {e}");
     }
 }
 
