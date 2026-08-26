@@ -67,14 +67,11 @@ pub enum Message {
     DragRelease(SurfaceId, String),
     AppHover(String),
     AppUnhover(String),
-    DragOutLaunch,
     MenuTogglePin(String),
     MenuLaunch(String),
     MenuCloseGroup(String),
     LaunchLauncher,
-    DockEntered,
     StripEntered,
-    DockLeftOrDragOut,
     AutoHideElapsed,
     RegionSync,
     None,
@@ -266,35 +263,56 @@ impl App {
                 self.on_icon_clicked(origin_surface, origin_key)
             }
             Message::AppHover(key) => {
+                debug!("AppHover {key}");
                 self.hovered = Some(key.clone());
 
+                // Touching any icon cancels a pending hide and reveals a
+                // hidden dock (same as the strip would).
+                self.hide_generation += 1;
+                let reveal_task = if !self.popup_visible {
+                    self.popup_visible = true;
+                    self.refresh()
+                } else {
+                    Task::none()
+                };
+
                 // Live reorder while dragging a pinned app over another pin.
-                if let Some((_, drag_key)) = self.drag.clone()
+                let reorder = if let Some((_, drag_key)) = self.drag.clone()
                     && drag_key != key
                     && drag_key.ends_with(".desktop")
                     && key.ends_with(".desktop")
                 {
-                    self.pins.move_before(&drag_key, &key);
-                }
-                Task::none()
+                    self.pins.move_before(&drag_key, &key)
+                } else {
+                    false
+                };
+                let _ = reorder;
+
+                reveal_task
             }
             Message::AppUnhover(key) => {
+                debug!("AppUnhover {key}");
                 if self.hovered.as_deref() == Some(key.as_str()) {
                     self.hovered = None;
                 }
-                Task::none()
-            }
-            Message::DragOutLaunch => {
-                let key = self.drag.take().map(|(_, key)| key);
-                if let Some(app) = key.and_then(|key| {
-                    self.groups().into_iter().find_map(|g| {
-                        (g.key == key)
+
+                // Mid-drag leave = torn off the dock: launch a new instance.
+                if let Some((_, drag_key)) = self.drag.take() {
+                    if let Some(app) = self.groups().into_iter().find_map(|g| {
+                        (g.key == drag_key)
                             .then_some(g.app)
                             .flatten()
                             .filter(|a| !a.exec.is_empty())
-                    })
-                }) {
-                    tokio::spawn(async move { launcher::execute(app.exec).await });
+                    }) {
+                        tokio::spawn(async move { launcher::execute(app.exec).await });
+                    }
+                    return Task::none();
+                }
+
+                // Leaving the LAST hovered icon starts the hide countdown —
+                // this replaces the old surface-bounds exit detection.
+                if self.hovered.is_none() && self.popup_visible {
+                    return self.on_dock_left().map(|_| Message::None);
                 }
                 Task::none()
             }
@@ -313,26 +331,6 @@ impl App {
                 } else {
                     self.on_dock_entered()
                 }
-            }
-            Message::DockEntered => {
-                debug!("DockEntered");
-                // A real enter on the dock itself always re-arms the strip.
-                self.strip_disarmed = false;
-                self.on_dock_entered()
-            }
-            Message::DockLeftOrDragOut => {
-                if self.drag.is_some() {
-                    // Torn off the dock: launch and end the drag.
-                    return self.update(Message::DragOutLaunch);
-                }
-
-                self.hovered = None;
-
-                // Keep the dock under an open popup; hide it after close.
-                if self.window_popup.is_some() {
-                    return Task::none();
-                }
-                self.on_dock_left()
             }
             Message::RegionSync => {
                 let _ = self.apply_input_regions();
@@ -671,21 +669,34 @@ impl App {
         // --- Launcher button ---
         let launcher_button = launcher.enabled.then(|| {
             let text_color = color_from_hex(launcher.text_color, launcher.opacity);
-            button(
+            let btn: iced::Element<'_, Message> = button(
                 text(launcher.label)
                     .size(appearance.icon_size as f32)
                     .width(Length::Fixed(appearance.icon_size as f32))
                     .align_x(iced::alignment::Horizontal::Center),
             )
-            .style(move |_, _status| iced::widget::button::Style {
-                background: None,
-                border: iced::Border::default().rounded(appearance.border_radius),
-                text_color,
-                ..Default::default()
-            })
+            .style(
+                move |_: &iced::Theme, _status: iced::widget::button::Status| {
+                    iced::widget::button::Style {
+                        background: None,
+                        border: iced::Border::default().rounded(appearance.border_radius),
+                        text_color,
+                        ..Default::default()
+                    }
+                },
+            )
             .padding(0.0)
             .on_press(Message::LaunchLauncher)
-            .into()
+            .into();
+            btn
+        });
+
+        let launcher_button = launcher_button.map(|el| {
+            let wrapped: Element<'_, Message> = mouse_area(el)
+                .on_enter(Message::AppHover("__launcher".into()))
+                .on_exit(Message::AppUnhover("__launcher".into()))
+                .into();
+            wrapped
         });
 
         let (mut children, mut trailing): (Vec<Element<'_, Message>>, Vec<Element<'_, Message>>) =
@@ -740,30 +751,7 @@ impl App {
             })
             .into();
 
-        // Horizontal docks have hover headroom in the surface: pin the visual
-        // dock to its screen edge so icons overflow toward open space.
-        let dock: Element<'_, Message> = if self.config.position.is_horizontal() {
-            let align_y = match self.config.position {
-                config::Position::Top => iced::alignment::Vertical::Top,
-                _ => iced::alignment::Vertical::Bottom,
-            };
-            container(dock)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_y(align_y)
-                .into()
-        } else {
-            dock
-        };
-
-        if self.is_popup() {
-            mouse_area(dock)
-                .on_enter(Message::DockEntered)
-                .on_exit(Message::DockLeftOrDragOut)
-                .into()
-        } else {
-            dock
-        }
+        dock
     }
 
     /// Transparent hotspot strip: hovering it reveals the dock. It always
