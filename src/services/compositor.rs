@@ -57,36 +57,44 @@ async fn broadcaster_event_loop(tx: broadcast::Sender<Message>) {
         Err(e) => error!("Failed to fetch initial window list: {e}"),
     }
 
-    let mut listener = AsyncEventListener::new();
+    // The listener dies permanently on any socket error; restart it so
+    // window tracking survives compositor hiccups.
+    loop {
+        let mut listener = AsyncEventListener::new();
 
-    macro_rules! add_refresh_handler {
-        ($method:ident) => {
-            listener.$method({
-                let tx = tx.clone();
-                move |_| {
+        macro_rules! add_refresh_handler {
+            ($method:ident) => {
+                listener.$method({
                     let tx = tx.clone();
-                    Box::pin(async move {
-                        match fetch_windows() {
-                            Ok(windows) => {
-                                let _ = tx.send(Message::Updated(windows));
+                    move |_| {
+                        let tx = tx.clone();
+                        Box::pin(async move {
+                            match fetch_windows() {
+                                Ok(windows) => {
+                                    let _ = tx.send(Message::Updated(windows));
+                                }
+                                Err(e) => error!("Failed to refresh window list: {e}"),
                             }
-                            Err(e) => error!("Failed to refresh window list: {e}"),
-                        }
-                    })
-                }
-            });
-        };
-    }
+                        })
+                    }
+                });
+            };
+        }
 
-    add_refresh_handler!(add_window_opened_handler);
-    add_refresh_handler!(add_window_closed_handler);
-    add_refresh_handler!(add_active_window_changed_handler);
-    add_refresh_handler!(add_window_moved_handler);
-    add_refresh_handler!(add_active_monitor_changed_handler);
-    add_refresh_handler!(add_workspace_changed_handler);
+        add_refresh_handler!(add_window_opened_handler);
+        add_refresh_handler!(add_window_closed_handler);
+        add_refresh_handler!(add_active_window_changed_handler);
+        add_refresh_handler!(add_window_moved_handler);
+        add_refresh_handler!(add_active_monitor_changed_handler);
+        add_refresh_handler!(add_workspace_changed_handler);
 
-    if let Err(e) = listener.start_listener_async().await {
-        error!("Hyprland event listener failed: {e}");
+        if let Err(e) = listener.start_listener_async().await {
+            error!("Hyprland event listener failed: {e}; restarting in 5 s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } else {
+            error!("Hyprland event listener ended unexpectedly; restarting in 5 s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
     }
 }
 
@@ -126,6 +134,7 @@ pub fn subscribe() -> Subscription<Message> {
                 match rx.recv().await {
                     Ok(message) => {
                         if output.send(message).await.is_err() {
+                            debug!("Compositor subscriber disconnected");
                             break;
                         }
                     }

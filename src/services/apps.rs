@@ -149,6 +149,11 @@ impl AppRegistry {
             }
         }
 
+        // Any size at all (e.g. scalable-only icons outside the theme).
+        if let Some(path) = freedesktop_icons::lookup(name).find() {
+            return Some(path);
+        }
+
         pixmap_fallback(name)
     }
 }

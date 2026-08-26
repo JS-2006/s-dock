@@ -8,7 +8,7 @@ use iced::{
     time,
     widget::{button, column, container, image, mouse_area, row, text},
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::{
     config,
@@ -31,6 +31,8 @@ pub struct App {
     pins: state::Pins,
     /// Open "multiple windows" popup, if any.
     window_popup: Option<WindowPopup>,
+    /// Guards stale delayed popup-close tasks.
+    popup_close_generation: u64,
     /// icon name → resolved path cache
     icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
     /// Popup mode: docks whose cursor-reveal is active (per output surface).
@@ -39,9 +41,10 @@ pub struct App {
     hide_generations: HashMap<SurfaceId, u64>,
     /// Slide animation progress per dock: 0 = hidden, 1 = shown.
     anims: HashMap<SurfaceId, Anim>,
-    /// Bumped whenever the set of running animations changes.
-    #[allow(dead_code)]
-    anim_epoch: u64,
+    /// Docks whose strip must ignore the next enter (cursor parked at the
+    /// screen edge right where the strip lives) — prevents the
+    /// hide→instant-reveal loop.
+    strip_disarmed: HashSet<SurfaceId>,
     /// Active drag: (surface, group key).
     drag: Option<(SurfaceId, String)>,
     /// Group key currently under the cursor.
@@ -57,6 +60,8 @@ pub enum Message {
     PinsChanged(state::Pins),
     WindowClicked(String),
     CloseWindowPopup,
+    PopupEntered,
+    CloseWindowPopupElapsed(u64),
     ContextMenuRequested(SurfaceId, String),
     DragStart(SurfaceId, String),
     DragRelease(SurfaceId, String),
@@ -68,6 +73,7 @@ pub enum Message {
     MenuCloseGroup(String),
     LaunchLauncher,
     DockEntered(SurfaceId),
+    StripEntered(SurfaceId),
     DockLeftOrDragOut(SurfaceId),
     AutoHideElapsed(SurfaceId, u64),
     AnimTick,
@@ -117,12 +123,13 @@ impl App {
             registry: AppRegistry::load(),
             windows: DockWindows::default(),
             window_popup: None,
+            popup_close_generation: 0,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
             visible_docks: HashSet::new(),
             hide_generations: HashMap::new(),
             anims: HashMap::new(),
-            anim_epoch: 0,
+            strip_disarmed: HashSet::new(),
             drag: None,
             hovered: None,
         }
@@ -163,6 +170,11 @@ impl App {
                 self.apply_input_regions()
             }
             Message::WindowsUpdated(windows) => {
+                debug!(
+                    "windows: {} tracked, {} groups rendered",
+                    windows.windows.len(),
+                    self.groups().len()
+                );
                 self.windows = windows;
 
                 // Close the popup when none of its windows remain.
@@ -187,7 +199,26 @@ impl App {
                 tokio::spawn(async move { focus_window(&address2).await });
                 self.close_window_popup().map(|_| Message::None)
             }
-            Message::CloseWindowPopup => self.close_window_popup().map(|_| Message::None),
+            Message::CloseWindowPopup => {
+                // Small delay so crossing the gap between the popup and the
+                // dock doesn't slam the menu shut.
+                self.popup_close_generation += 1;
+                let generation = self.popup_close_generation;
+                Task::perform(
+                    async move { tokio::time::sleep(Duration::from_millis(250)).await },
+                    move |_| Message::CloseWindowPopupElapsed(generation),
+                )
+            }
+            Message::PopupEntered => {
+                self.popup_close_generation += 1;
+                Task::none()
+            }
+            Message::CloseWindowPopupElapsed(generation) => {
+                if self.popup_close_generation == generation && self.window_popup.is_some() {
+                    return self.close_window_popup().map(|_| Message::None);
+                }
+                Task::none()
+            }
             Message::ContextMenuRequested(surface, key) => self.open_context_menu(surface, key),
             Message::MenuTogglePin(key) => {
                 if key.ends_with(".desktop") {
@@ -269,7 +300,21 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DockEntered(id) => self.on_dock_entered(id),
+            Message::StripEntered(dock_id) => {
+                // Ignore the phantom enter caused by the input region
+                // expanding under a stationary cursor right after a hide.
+                if self.strip_disarmed.remove(&dock_id) {
+                    debug!("strip re-enter ignored for {dock_id:?}");
+                    Task::none()
+                } else {
+                    self.on_dock_entered(dock_id)
+                }
+            }
+            Message::DockEntered(id) => {
+                // A real enter on the dock itself always re-arms the strip.
+                self.strip_disarmed.remove(&id);
+                self.on_dock_entered(id)
+            }
             Message::DockLeftOrDragOut(id) => {
                 if self.drag.is_some() {
                     // Torn off the dock: launch and end the drag.
@@ -277,6 +322,11 @@ impl App {
                 }
 
                 self.hovered = None;
+
+                // Keep the dock under an open popup; hide it after close.
+                if self.window_popup.is_some() {
+                    return Task::none();
+                }
                 self.on_dock_left(id)
             }
             Message::AutoHideElapsed(id, generation) => {
@@ -362,6 +412,9 @@ impl App {
         for id in finished_hide {
             self.anims.remove(&id);
             self.visible_docks.remove(&id);
+            // The pointer may be resting exactly on the strip: swallow the
+            // immediate synthetic enter, reveal only after a real re-enter.
+            self.strip_disarmed.insert(id);
         }
 
         if hides {
@@ -445,8 +498,19 @@ impl App {
     }
 
     fn close_window_popup(&mut self) -> Task<()> {
-        self.window_popup = None;
-        self.outputs.close_window_popup()
+        if self.window_popup.take().is_none() {
+            return self.outputs.close_window_popup();
+        }
+
+        // The dock under the popup paused its auto-hide: resume it now that
+        // the popup is gone.
+        let mut tasks: Vec<Task<()>> = vec![self.outputs.close_window_popup()];
+        if self.is_popup() {
+            for id in self.visible_docks.clone() {
+                tasks.push(self.on_dock_left(id).map(|_| ()));
+            }
+        }
+        Task::batch(tasks)
     }
 
     fn open_context_menu(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
@@ -676,10 +740,12 @@ impl App {
 
     /// Transparent hotspot strip: hovering it reveals the sibling dock.
     fn strip_view(&self, strip_id: SurfaceId) -> Element<'_, Message> {
-        let dock_id = self.outputs.dock_for_strip(strip_id);
-        mouse_area(container(row![]).width(Length::Fill).height(Length::Fill))
-            .on_enter(Message::DockEntered(dock_id.unwrap_or(strip_id)))
-            .into()
+        let area = mouse_area(container(row![]).width(Length::Fill).height(Length::Fill));
+
+        match self.outputs.dock_for_strip(strip_id) {
+            Some(dock_id) => area.on_enter(Message::StripEntered(dock_id)).into(),
+            None => area.into(),
+        }
     }
 
     fn app_icon_handle(&self, group: &AppGroup) -> Option<image::Handle> {
@@ -861,6 +927,7 @@ impl App {
                 });
 
         mouse_area(content.width(Length::Fill).height(Length::Shrink))
+            .on_enter(Message::PopupEntered)
             .on_exit(Message::CloseWindowPopup)
             .into()
     }
