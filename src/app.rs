@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iced::{
@@ -11,6 +12,7 @@ use log::{debug, info, warn};
 
 use crate::{
     config,
+    ipc::{IpcCommand, Rect},
     outputs::{Outputs, SurfaceKind},
     services::{
         apps::{AppRegistry, DesktopApp},
@@ -46,6 +48,12 @@ pub struct App {
     drag_moved: bool,
     /// Group key currently under the cursor.
     hovered: Option<String>,
+    /// IPC: keep the dock visible regardless of auto-hide while set.
+    forced_visible: bool,
+    /// IPC: shared dock geometry, kept fresh for `geometry` queries.
+    dock_rect: Arc<Mutex<Option<Rect>>>,
+    /// Primary output logical size (for geometry approximation).
+    screen_size: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +80,7 @@ pub enum Message {
     DockEntered,
     DockLeftOrDragOut,
     AutoHideElapsed(u64),
+    Ipc(IpcCommand),
     None,
 }
 
@@ -100,7 +109,10 @@ struct AppGroup {
 }
 
 impl App {
-    pub fn new((config, config_path): (config::Config, PathBuf)) -> Self {
+    pub fn new(
+        (config, config_path): (config::Config, PathBuf),
+        dock_rect: Arc<Mutex<Option<Rect>>>,
+    ) -> Self {
         let pins = state::Pins::load(&config_path);
 
         Self {
@@ -119,6 +131,9 @@ impl App {
             drag: None,
             drag_moved: false,
             hovered: None,
+            forced_visible: false,
+            dock_rect,
+            screen_size: None,
         }
     }
 
@@ -136,6 +151,8 @@ impl App {
             }
             Message::OutputEvent(event) => match event {
                 OutputEvent::Added(info) => {
+                    self.screen_size = info.logical_size;
+                    self.recompute_dock_rect();
                     let create = self
                         .outputs
                         .create(&self.config, info.name.clone(), info.id);
@@ -304,11 +321,37 @@ impl App {
                 self.on_dock_left()
             }
             Message::AutoHideElapsed(generation) => {
+                if self.forced_visible {
+                    return Task::none();
+                }
                 if self.hide_generation == generation {
                     self.popup_visible = false;
                 }
                 self.apply_input_regions()
             }
+            Message::Ipc(cmd) => match cmd {
+                IpcCommand::ForceVisible(v) => {
+                    self.forced_visible = v;
+                    if v {
+                        self.popup_visible = true;
+                        self.apply_input_regions();
+                    }
+                    Task::none()
+                }
+                IpcCommand::Pin(id) => {
+                    if !self.pins.contains(&id) {
+                        self.pins.toggle(&id);
+                    }
+                    Task::none()
+                }
+                IpcCommand::Unpin(id) => {
+                    if self.pins.contains(&id) {
+                        self.pins.toggle(&id);
+                    }
+                    Task::none()
+                }
+                IpcCommand::Geometry => Task::none(),
+            },
             Message::None => Task::none(),
         }
     }
@@ -398,7 +441,28 @@ impl App {
         }
         debug!("fit size -> {:?}", size);
         self.applied_fit_size = Some(size);
+        self.recompute_dock_rect();
         self.outputs.apply_fit_size(size).map(|_| Message::None)
+    }
+
+    /// Approximate the global dock rectangle from the primary output size,
+    /// the dock content size, and the configured `position`. Used by the IPC
+    /// `geometry` query (exact multi-output positions aren't exposed by the
+    /// layer-shell backend).
+    fn recompute_dock_rect(&mut self) {
+        let rect = match (self.screen_size, self.applied_fit_size) {
+            (Some((sw, sh)), Some((dw, dh))) => {
+                let (x, y) = match self.config.position {
+                    config::Position::Top => (0, 0),
+                    config::Position::Bottom => (0, sh - dh as i32),
+                    config::Position::Left => (0, 0),
+                    config::Position::Right => (sw - dw as i32, 0),
+                };
+                Some(Rect { x, y, w: dw, h: dh })
+            }
+            _ => None,
+        };
+        *self.dock_rect.lock().unwrap() = rect;
     }
 
     fn on_icon_clicked(&mut self, surface: SurfaceId, key: String) -> Task<Message> {
@@ -967,6 +1031,7 @@ impl App {
                 state::Message::PinsChanged(p) => Message::PinsChanged(p),
             }),
             output_events().map(Message::OutputEvent),
+            crate::ipc::subscription().map(Message::Ipc),
             compositor::subscribe().map(|m| match m {
                 compositor::Message::Ready(windows) => Message::WindowsReady(windows),
                 compositor::Message::Updated(windows) => Message::WindowsUpdated(windows),

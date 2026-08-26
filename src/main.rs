@@ -4,10 +4,16 @@ use flexi_logger::{
 };
 use iced::Task;
 use log::{error, warn};
-use std::{backtrace::Backtrace, panic, path::PathBuf};
+use std::{
+    backtrace::Backtrace,
+    panic,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 mod app;
 mod config;
+mod ipc;
 mod outputs;
 mod services;
 mod state;
@@ -80,9 +86,12 @@ fn main() -> iced::Result {
 
     let initial_layer_settings = outputs::dock_layer_settings(&config, None);
 
+    let dock_rect: Arc<Mutex<Option<ipc::Rect>>> = Arc::new(Mutex::new(None));
+    ipc::init(dock_rect.clone());
+
     iced::application(
         move || {
-            let app = App::new((config.clone(), config_path.clone()));
+            let app = App::new((config.clone(), config_path.clone()), dock_rect.clone());
             (app, Task::none())
         },
         App::update,
