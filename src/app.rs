@@ -1,10 +1,11 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::{
     Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
+    time,
     widget::{button, column, container, image, mouse_area, row, text},
 };
 use log::{info, warn};
@@ -32,10 +33,15 @@ pub struct App {
     window_popup: Option<WindowPopup>,
     /// icon name → resolved path cache
     icon_cache: RefCell<HashMap<String, Option<PathBuf>>>,
-    /// Popup mode: whether the dock is currently shown.
-    popup_visible: bool,
-    /// Guards stale auto-hide timers.
-    hide_generation: u64,
+    /// Popup mode: docks whose cursor-reveal is active (per output surface).
+    visible_docks: HashSet<SurfaceId>,
+    /// Guards stale auto-hide timers per dock surface.
+    hide_generations: HashMap<SurfaceId, u64>,
+    /// Slide animation progress per dock: 0 = hidden, 1 = shown.
+    anims: HashMap<SurfaceId, Anim>,
+    /// Bumped whenever the set of running animations changes.
+    #[allow(dead_code)]
+    anim_epoch: u64,
     /// Active drag: (surface, group key).
     drag: Option<(SurfaceId, String)>,
     /// Group key currently under the cursor.
@@ -61,9 +67,10 @@ pub enum Message {
     MenuLaunch(String),
     MenuCloseGroup(String),
     LaunchLauncher,
-    DockEntered,
-    DockLeftOrDragOut,
-    AutoHideElapsed(u64),
+    DockEntered(SurfaceId),
+    DockLeftOrDragOut(SurfaceId),
+    AutoHideElapsed(SurfaceId, u64),
+    AnimTick,
     None,
 }
 
@@ -72,6 +79,14 @@ enum PopupKind {
     WindowList,
     AppMenu,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct Anim {
+    progress: f32,
+    to_visible: bool,
+}
+
+const ANIM_STEP: f32 = 0.12; // ~13 frames @150ms
 
 struct WindowPopup {
     kind: PopupKind,
@@ -104,8 +119,10 @@ impl App {
             window_popup: None,
             pins,
             icon_cache: RefCell::new(HashMap::new()),
-            popup_visible: false,
-            hide_generation: 0,
+            visible_docks: HashSet::new(),
+            hide_generations: HashMap::new(),
+            anims: HashMap::new(),
+            anim_epoch: 0,
             drag: None,
             hovered: None,
         }
@@ -252,21 +269,27 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DockEntered => self.on_dock_entered(),
-            Message::DockLeftOrDragOut => {
+            Message::DockEntered(id) => self.on_dock_entered(id),
+            Message::DockLeftOrDragOut(id) => {
                 if self.drag.is_some() {
                     // Torn off the dock: launch and end the drag.
                     return self.update(Message::DragOutLaunch);
                 }
 
                 self.hovered = None;
-                self.on_dock_left()
+                self.on_dock_left(id)
             }
-            Message::AutoHideElapsed(generation) => {
-                if self.hide_generation == generation {
-                    self.popup_visible = false;
+            Message::AutoHideElapsed(id, generation) => {
+                let valid = self.hide_generations.get(&id) == Some(&generation)
+                    && self.visible_docks.contains(&id);
+                if valid {
+                    self.start_anim(id, false);
                 }
                 self.apply_input_regions()
+            }
+            Message::AnimTick => {
+                self.tick_anims();
+                Task::none()
             }
             Message::None => Task::none(),
         }
@@ -276,64 +299,94 @@ impl App {
         self.config.mode == config::Mode::Popup
     }
 
-    fn on_dock_entered(&mut self) -> Task<Message> {
+    fn on_dock_entered(&mut self, id: SurfaceId) -> Task<Message> {
         if !self.is_popup() {
             return Task::none();
         }
-        // (Re-)entering cancels any pending auto-hide.
-        self.hide_generation = self.hide_generation.wrapping_add(1);
-        let was_visible = self.popup_visible;
-        self.popup_visible = true;
+        // (Re-)entering cancels any pending auto-hide for this dock.
+        let generation = self.hide_generations.entry(id).or_default();
+        *generation += 1;
 
-        if was_visible {
-            Task::none()
-        } else {
+        if self.visible_docks.insert(id) {
+            self.start_anim(id, true);
             self.apply_input_regions()
+        } else {
+            Task::none()
         }
     }
 
-    fn on_dock_left(&mut self) -> Task<Message> {
-        if !self.is_popup() || !self.popup_visible {
+    fn on_dock_left(&mut self, id: SurfaceId) -> Task<Message> {
+        if !self.is_popup() || !self.visible_docks.contains(&id) {
             return Task::none();
         }
         let timeout = self.config.popup.autohide_timeout;
         if timeout == 0 {
             return Task::none();
         }
-        self.hide_generation = self.hide_generation.wrapping_add(1);
-        let generation = self.hide_generation;
+        let entry = self.hide_generations.entry(id).or_default();
+        *entry += 1;
+        let generation = *entry;
 
         Task::perform(
             async move { tokio::time::sleep(Duration::from_secs(timeout)).await },
-            move |_| Message::AutoHideElapsed(generation),
+            move |_| Message::AutoHideElapsed(id, generation),
         )
     }
 
-    /// Syncs pointer input regions with popup visibility: when hidden the dock
-    /// surface must not intercept clicks and the strips must catch hover;
-    /// when visible it's the opposite.
+    fn start_anim(&mut self, id: SurfaceId, to_visible: bool) {
+        self.anims.insert(
+            id,
+            Anim {
+                progress: if to_visible { 0.0 } else { 1.0 },
+                to_visible,
+            },
+        );
+    }
+
+    /// Advances slide animations; finishes hides (drops visibility + regions).
+    fn tick_anims(&mut self) {
+        let mut finished_hide = Vec::new();
+
+        for (id, anim) in self.anims.iter_mut() {
+            if anim.to_visible {
+                anim.progress = (anim.progress + ANIM_STEP).min(1.0);
+            } else {
+                anim.progress = (anim.progress - ANIM_STEP).max(0.0);
+                if anim.progress == 0.0 {
+                    finished_hide.push(*id);
+                }
+            }
+        }
+
+        let hides = !finished_hide.is_empty();
+        for id in finished_hide {
+            self.anims.remove(&id);
+            self.visible_docks.remove(&id);
+        }
+
+        if hides {
+            // Re-sync regions once hidden docks stop accepting input.
+            let _ = self.apply_input_regions();
+        }
+    }
+
+    /// Syncs pointer input regions with popup visibility: hidden docks must
+    /// not intercept clicks while their strips catch hover; visible docks are
+    /// the opposite.
     fn apply_input_regions(&self) -> Task<Message> {
         if !self.is_popup() {
             return Task::none();
         }
-        let dock_region = if self.popup_visible {
-            None
-        } else {
-            Some(Vec::new())
-        };
-        let strip_region = if self.popup_visible {
-            Some(Vec::new())
-        } else {
-            None
-        };
 
         let mut tasks: Vec<Task<Message>> = Vec::new();
-        for id in self.outputs.strip_ids() {
-            tasks
-                .push(set_input_region::<Message>(id, strip_region.clone()).map(|_| Message::None));
-        }
-        for id in self.outputs.dock_ids() {
-            tasks.push(set_input_region::<Message>(id, dock_region.clone()).map(|_| Message::None));
+        for (dock_id, strip_id) in self.outputs.docks_with_strips() {
+            let visible = self.visible_docks.contains(&dock_id);
+            let dock_region = visible.then(Vec::new);
+            tasks.push(set_input_region::<Message>(dock_id, dock_region).map(|_| Message::None));
+            if let Some(strip) = strip_id {
+                let strip_region = (!visible).then(Vec::new);
+                tasks.push(set_input_region::<Message>(strip, strip_region).map(|_| Message::None));
+            }
         }
 
         Task::batch(tasks)
@@ -484,14 +537,25 @@ impl App {
 
     pub fn view(&self, id: SurfaceId) -> Element<'_, Message> {
         match self.outputs.kind(id) {
-            Some(SurfaceKind::Strip) => return self.strip_view(),
+            Some(SurfaceKind::Strip) => return self.strip_view(id),
             Some(SurfaceKind::WindowList) => return self.window_list_view(id),
             Some(SurfaceKind::Dock) => {}
             None => return row![].into(),
         }
 
-        // A hidden popup dock renders nothing (its input region is cleared).
-        if self.is_popup() && !self.popup_visible {
+        // A fully hidden popup dock renders nothing (input region cleared).
+        let anim_progress = if self.is_popup() {
+            match self.anims.get(&id) {
+                Some(a) => a.progress,
+                None if self.visible_docks.contains(&id) => 1.0,
+                _ => return row![].into(),
+            }
+        } else {
+            1.0
+        };
+        let hidden_now =
+            self.is_popup() && !self.visible_docks.contains(&id) && anim_progress <= 0.0;
+        if hidden_now {
             return row![].into();
         }
 
@@ -535,6 +599,15 @@ impl App {
 
         let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
 
+        // Slide-out offset for the popup reveal animation: the dock slides
+        // toward its screen edge and gets clipped by the surface bounds.
+        let thickness = appearance.dock_size as f32;
+        let slide = if self.is_popup() {
+            ((1.0 - anim_progress) * thickness).max(0.0)
+        } else {
+            0.0
+        };
+
         // `Fit`: widen the dock past the first/last icon by the corner radius
         // so icons never sit inside the rounded-off corners.
         let fit_padding = match appearance.width {
@@ -542,10 +615,22 @@ impl App {
             config::WidthMode::Full => 0.0,
         };
 
+        let (pt, pr, pb, pl) = match self.config.position {
+            config::Position::Bottom => (slide, 0.0, 0.0, 0.0),
+            config::Position::Top => (0.0, 0.0, slide, 0.0),
+            config::Position::Left => (0.0, slide, 0.0, 0.0),
+            config::Position::Right => (0.0, 0.0, 0.0, slide),
+        };
+
         let dock: Element<'_, Message> = container(content)
             .width(Length::Fill)
-            .height(Length::Fixed(appearance.dock_size as f32))
-            .padding([0.0, fit_padding])
+            .height(Length::Fixed(thickness))
+            .padding(iced::Padding {
+                top: pt,
+                right: fit_padding + pr,
+                bottom: pb,
+                left: fit_padding + pl,
+            })
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center)
             .style(move |theme: &iced::Theme| container::Style {
@@ -565,35 +650,35 @@ impl App {
 
         // Horizontal docks have hover headroom in the surface: pin the visual
         // dock to its screen edge so icons overflow toward open space.
-        let dock: Element<'_, Message> =
-            if self.config.position.is_horizontal() {
-                let align_y = match self.config.position {
-                    config::Position::Top => iced::alignment::Vertical::Top,
-                    _ => iced::alignment::Vertical::Bottom,
-                };
-                container(dock)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_y(align_y)
-                    .into()
-            } else {
-                dock
+        let dock: Element<'_, Message> = if self.config.position.is_horizontal() {
+            let align_y = match self.config.position {
+                config::Position::Top => iced::alignment::Vertical::Top,
+                _ => iced::alignment::Vertical::Bottom,
             };
+            container(dock)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(align_y)
+                .into()
+        } else {
+            dock
+        };
 
         if self.is_popup() {
             mouse_area(dock)
-                .on_enter(Message::DockEntered)
-                .on_exit(Message::DockLeftOrDragOut)
+                .on_enter(Message::DockEntered(id))
+                .on_exit(Message::DockLeftOrDragOut(id))
                 .into()
         } else {
             dock
         }
     }
 
-    /// Transparent hotspot strip: hovering it reveals the dock.
-    fn strip_view(&self) -> Element<'_, Message> {
+    /// Transparent hotspot strip: hovering it reveals the sibling dock.
+    fn strip_view(&self, strip_id: SurfaceId) -> Element<'_, Message> {
+        let dock_id = self.outputs.dock_for_strip(strip_id);
         mouse_area(container(row![]).width(Length::Fill).height(Length::Fill))
-            .on_enter(Message::DockEntered)
+            .on_enter(Message::DockEntered(dock_id.unwrap_or(strip_id)))
             .into()
     }
 
@@ -843,6 +928,11 @@ impl App {
                 state::Message::PinsChanged(p) => Message::PinsChanged(p),
             }),
             output_events().map(Message::OutputEvent),
+            if self.anims.is_empty() {
+                Subscription::none()
+            } else {
+                time::every(Duration::from_millis(16)).map(|_| Message::AnimTick)
+            },
             compositor::subscribe().map(|m| match m {
                 compositor::Message::Ready(windows) => Message::WindowsReady(windows),
                 compositor::Message::Updated(windows) => Message::WindowsUpdated(windows),

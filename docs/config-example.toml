@@ -27,6 +27,10 @@ running_indicator_size = 5
 hotspot_width = "dock"      # "dock" — во всю ширину края, или число px
 hotspot_height = 8
 autohide_timeout = 3        # сек без курсора на доке до скрытия; 0 = не скрывать
+menu_width = 360            # ширина контекстного меню / списка окон
+entry_height = 44           # высота строки попапа
+font_size = 14.0            # размер текста строк
+max_entries = 8             # максимум видимых строк
 
 [launcher]
 enabled = true

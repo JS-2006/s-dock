@@ -94,14 +94,20 @@ impl Outputs {
         }
     }
 
-    pub fn dock_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
+    /// (dock surface, optional sibling strip) pairs, including the fallback.
+    pub fn docks_with_strips(&self) -> impl Iterator<Item = (SurfaceId, Option<SurfaceId>)> + '_ {
         self.fallback
             .into_iter()
-            .chain(self.surfaces.iter().map(|s| s.dock_id))
+            .map(|id| (id, None))
+            .chain(self.surfaces.iter().map(|s| (s.dock_id, s.strip_id)))
     }
 
-    pub fn strip_ids(&self) -> impl Iterator<Item = SurfaceId> + '_ {
-        self.surfaces.iter().filter_map(|s| s.strip_id)
+    /// The dock surface sharing an output with the given strip.
+    pub fn dock_for_strip(&self, strip_id: SurfaceId) -> Option<SurfaceId> {
+        self.surfaces
+            .iter()
+            .find(|s| s.strip_id == Some(strip_id))
+            .map(|s| s.dock_id)
     }
 
     fn destroy_fallback(&mut self) -> Task<()> {

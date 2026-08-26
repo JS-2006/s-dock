@@ -183,19 +183,23 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
       разделитель, список окон этого приложения (title усечённый) → клик = фокус.
 - [ ] Проверка: закрыть/переключить окно из меню. Коммит `feat(dock): context menu`.
 
-## Этап 7. Popup-режим
+## Этап 7. Popup-режим [ГОТОВ]
 
-- [ ] 7.1 Полоска-хотспот отдельной поверхностью (hotspot_width/hotspot_height),
+- [x] 7.3 Анимация выезда: slide к краю экрана (~150 мс, ANIM_STEP), тики
+      только пока есть анимации (time::every 16ms условно в subscription);
+      завершение скрытия снимает видимость и пересинхронизирует input region.
+- [x] 7.2 Пер-мониторная видимость: visible_docks/hide_generations keyed by
+      SurfaceId; strip будит только свой dock (dock_for_strip);
+      apply_input_regions по паре (dock,strip). (hotspot_width/hotspot_height),
       anchor как у дока; MouseArea enter → показать док (анимация slide:
       изменение margin/size по кадрам через time::every или анимация iced),
       leave дока → скрыть, вернуть полоску.
-- [ ] 7.2 Координация per-output в outputs.rs (dock surface + hotspot surface).
-- [ ] Проверка у владельца. Коммит `feat(dock): popup mode with hotspot strip`.
+- [ ] Визуальная проверка владельцем (анимация, независимость мониторов).
 
-## Этап 8. Финализация
+## Этап 8. Финализация [ГОТОВ]
 
-- [ ] README.md (установка, конфиг), пример конфига в docs/, CHANGELOG.
-      Коммит `docs: readme and example config`.
+- [x] README.md, docs/config-example.toml дополнен полями popup-меню,
+      docs/pins-example.toml, CHANGELOG.md.
 
 ## Известные риски
 
