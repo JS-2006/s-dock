@@ -137,6 +137,12 @@ fn fetch_windows() -> anyhow::Result<DockWindows> {
     Ok(DockWindows { windows, active })
 }
 
+/// Fresh one-shot snapshot for the "query before render" flow: the dock must
+/// never draw its icon row from data it has not explicitly requested.
+pub async fn fetch_snapshot() -> anyhow::Result<DockWindows> {
+    fetch_windows()
+}
+
 pub fn subscribe() -> Subscription<Message> {
     Subscription::run_with(TypeId::of::<DockWindows>(), |_| {
         channel(100, async |mut output| {

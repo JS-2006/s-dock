@@ -2,7 +2,6 @@ use clap::Parser;
 use flexi_logger::{
     Age, Cleanup, Criterion, FileSpec, LogSpecBuilder, LogSpecification, Logger, Naming,
 };
-use iced::Task;
 use log::{error, warn};
 use std::{
     backtrace::Backtrace,
@@ -92,7 +91,8 @@ fn main() -> iced::Result {
     iced::application(
         move || {
             let app = App::new((config.clone(), config_path.clone()), dock_rect.clone());
-            (app, Task::none())
+            let task = app.bootstrap();
+            (app, task)
         },
         App::update,
         App::view,

@@ -59,6 +59,9 @@ pub struct App {
     icons_overflow: bool,
     /// Whether dock surfaces currently hold keyboard (OnDemand) focus.
     keyboard_grabbed: bool,
+    /// True once at least one windows snapshot has been fetched: the icon
+    /// row is never drawn from unrequested (empty) data.
+    windows_loaded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +148,13 @@ impl App {
             screen_size: None,
             icons_overflow: false,
             keyboard_grabbed: false,
+            windows_loaded: false,
         }
+    }
+
+    /// First render must be preceded by an explicit windows query.
+    pub fn bootstrap(&self) -> Task<Message> {
+        self.fetch_task()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -158,7 +167,10 @@ impl App {
                 // Geometry-affecting options require fresh surfaces.
                 let recreate = self.outputs.recreate_all(&self.config);
 
-                recreate.map(|_| Message::None).chain(self.refresh())
+                recreate
+                    .map(|_| Message::None)
+                    .chain(self.refresh())
+                    .chain(self.fetch_task())
             }
             Message::OutputEvent(event) => match event {
                 OutputEvent::Added(info) => {
@@ -168,7 +180,10 @@ impl App {
                         .outputs
                         .create(&self.config, info.name.clone(), info.id);
 
-                    create.map(|_| Message::None).chain(self.refresh())
+                    create
+                        .map(|_| Message::None)
+                        .chain(self.refresh())
+                        .chain(self.fetch_task())
                 }
                 OutputEvent::Removed(output_id) => self
                     .outputs
@@ -180,12 +195,14 @@ impl App {
                 }
             },
             Message::WindowsReady(windows) => {
+                self.windows_loaded = true;
                 self.windows = windows;
                 // First service tick after startup: enforce hidden regions
                 // and push the initial fit size.
                 self.refresh()
             }
             Message::WindowsUpdated(windows) => {
+                self.windows_loaded = true;
                 self.windows = windows;
 
                 // Close the popup when none of its windows remain.
@@ -402,7 +419,9 @@ impl App {
         if was_visible {
             Task::none()
         } else {
-            self.apply_input_regions()
+            // Fresh windows query right before revealing the dock: what the
+            // user sees is what the compositor reports right now.
+            self.apply_input_regions().chain(self.fetch_task())
         }
     }
 
@@ -458,6 +477,17 @@ impl App {
         let regions = self.apply_input_regions();
         let size_sync = self.sync_fit_size();
         regions.chain(size_sync)
+    }
+
+    /// One-shot windows query from the compositor.
+    fn fetch_task(&self) -> Task<Message> {
+        Task::perform(compositor::fetch_snapshot(), |result| match result {
+            Ok(windows) => Message::WindowsUpdated(windows),
+            Err(e) => {
+                log::error!("Compositor fetch failed: {e}");
+                Message::None
+            }
+        })
     }
 
     /// Caps the computed size at the output's main-axis size (minus margins)
@@ -688,6 +718,11 @@ impl App {
 
         // A hidden popup dock renders nothing (its input region is cleared).
         if self.is_popup() && !self.popup_visible {
+            return row![].into();
+        }
+
+        // Never draw icons from data that was not explicitly fetched.
+        if !self.windows_loaded {
             return row![].into();
         }
 
