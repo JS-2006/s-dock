@@ -141,16 +141,16 @@ impl Outputs {
     /// Creates the dock surface (and the hotspot strip in popup mode) bound to
     /// the given output, replacing the fallback surface on the first call.
     pub fn create(&mut self, config: &Config, name: String, output_id: OutputId) -> Task<()> {
-        let (dock_id, task) = new_layer_surface(dock_layer_settings(config, Some(output_id)));
+        // Birth the surface at the cached fit size directly: a follow-up
+        // `set_size` races the pending surface registration inside the
+        // backend and is silently dropped (the surface would stay at the
+        // settings stub size forever).
+        let mut settings = dock_layer_settings(config, Some(output_id));
+        if let Some(fit) = self.fit_size {
+            settings.size = Some(fit);
+        }
+        let (dock_id, task) = new_layer_surface(settings);
         info!("Created dock surface {dock_id:?} for output {name}");
-
-        // Apply the last known Fit size immediately; the surface may have been
-        // created after `sync_fit_size` ran, and the cached size would otherwise
-        // never reach it.
-        let size_task = match self.fit_size {
-            Some(size) => set_size::<()>(dock_id, size),
-            None => Task::none(),
-        };
 
         let strip_task = if config.mode == Mode::Popup {
             let (strip_id, task) = new_layer_surface(strip_layer_settings(config, Some(output_id)));
@@ -181,7 +181,6 @@ impl Outputs {
         }
         .chain(task)
         .chain(strip_task)
-        .chain(size_task)
     }
 
     /// Destroys every per-output surface, keeping the fallback alive, and
@@ -231,7 +230,11 @@ impl Outputs {
 
         // No outputs left: bring the fallback surface back.
         if self.surfaces.is_empty() && self.fallback.is_none() {
-            let (id, task) = new_layer_surface(dock_layer_settings(config, None));
+            let mut settings = dock_layer_settings(config, None);
+            if let Some(fit) = self.fit_size {
+                settings.size = Some(fit);
+            }
+            let (id, task) = new_layer_surface(settings);
             info!("No outputs left, recreated fallback surface {id:?}");
             self.fallback = Some(id);
 

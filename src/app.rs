@@ -164,7 +164,10 @@ impl App {
                 self.config = *config;
                 crate::theme::update(&self.config.appearance);
 
-                // Geometry-affecting options require fresh surfaces.
+                // Geometry-affecting options require fresh surfaces; they are
+                // born at the cached fit size, and the reset marker forces a
+                // re-send for the case the cache was empty at create time.
+                self.applied_fit_size = None;
                 let recreate = self.outputs.recreate_all(&self.config);
 
                 recreate
@@ -176,6 +179,11 @@ impl App {
                 OutputEvent::Added(info) => {
                     self.screen_size = info.logical_size;
                     self.recompute_dock_rect();
+                    // The new surface is born at the cached fit size; reset the
+                    // applied marker anyway so the next sync re-sends set_size
+                    // even when nothing else changed (covers surfaces created
+                    // before the first windows snapshot reached us).
+                    self.applied_fit_size = None;
                     let create = self
                         .outputs
                         .create(&self.config, info.name.clone(), info.id);
