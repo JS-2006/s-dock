@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iced::{
-    Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
+    Element, KeyboardInteractivity, Length, OutputEvent, Subscription, SurfaceId, Task,
+    output_events, set_input_region,
     widget::{button, column, container, image, mouse_area, row, scrollable, text},
 };
 use log::{debug, info, warn};
@@ -56,6 +57,8 @@ pub struct App {
     screen_size: Option<(i32, i32)>,
     /// Icon strip is wider than the screen: launcher is pinned, icons scroll.
     icons_overflow: bool,
+    /// Whether dock surfaces currently hold keyboard (OnDemand) focus.
+    keyboard_grabbed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +87,8 @@ pub enum Message {
     AutoHideElapsed(u64),
     /// Wheel-driven horizontal scroll of the icon strip (px delta).
     IconScrollBy(f32),
+    /// Raw key press; only Arrow keys are acted upon while overflowing.
+    KeyPressed(iced::keyboard::Key),
     Ipc(IpcCommand),
     None,
 }
@@ -139,6 +144,7 @@ impl App {
             dock_rect,
             screen_size: None,
             icons_overflow: false,
+            keyboard_grabbed: false,
         }
     }
 
@@ -338,6 +344,21 @@ impl App {
                 self.apply_input_regions()
             }
             Message::IconScrollBy(dx) => scroll_icons(dx),
+            Message::KeyPressed(key) => {
+                if !self.icons_overflow {
+                    return Task::none();
+                }
+                let horizontal = self.config.position.is_horizontal();
+                let slot = use_theme(|a| a.icon_size as f32 * a.hover_scale.max(1.0));
+                use iced::keyboard::key::Named;
+                match (key, horizontal) {
+                    (iced::keyboard::Key::Named(Named::ArrowRight), true)
+                    | (iced::keyboard::Key::Named(Named::ArrowDown), false) => scroll_icons(slot),
+                    (iced::keyboard::Key::Named(Named::ArrowLeft), true)
+                    | (iced::keyboard::Key::Named(Named::ArrowUp), false) => scroll_icons(-slot),
+                    _ => Task::none(),
+                }
+            }
             Message::Ipc(cmd) => match cmd {
                 IpcCommand::ForceVisible(v) => {
                     self.forced_visible = v;
@@ -467,13 +488,31 @@ impl App {
         let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, groups));
         let size = self.cap_to_screen(size);
 
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+
         if Some(size) != self.applied_fit_size {
             debug!("fit size -> {size:?} overflow={}", self.icons_overflow);
             self.applied_fit_size = Some(size);
             self.recompute_dock_rect();
-            return self.outputs.apply_fit_size(size).map(|_| Message::None);
+            tasks.push(self.outputs.apply_fit_size(size).map(|_| Message::None));
         }
-        Task::none()
+
+        // Keyboard scrolling is only meaningful while the strip overflows:
+        // dock surfaces then accept OnDemand focus (click) for Arrow keys.
+        if self.icons_overflow != self.keyboard_grabbed {
+            self.keyboard_grabbed = self.icons_overflow;
+            let ki = if self.icons_overflow {
+                KeyboardInteractivity::OnDemand
+            } else {
+                KeyboardInteractivity::None
+            };
+            let ids: Vec<SurfaceId> = self.outputs.dock_ids().collect();
+            tasks.extend(ids.into_iter().map(|id| {
+                iced::set_keyboard_interactivity::<Message>(id, ki).map(|_| Message::None)
+            }));
+        }
+
+        Task::batch(tasks)
     }
 
     /// Approximate the global dock rectangle from the primary output size,
@@ -1113,6 +1152,10 @@ impl App {
             compositor::subscribe().map(|m| match m {
                 compositor::Message::Ready(windows) => Message::WindowsReady(windows),
                 compositor::Message::Updated(windows) => Message::WindowsUpdated(windows),
+            }),
+            iced::keyboard::listen().map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key, .. } => Message::KeyPressed(key),
+                _ => Message::None,
             }),
         ])
     }
