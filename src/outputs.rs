@@ -25,10 +25,9 @@ struct OutputDock {
     name: String,
 }
 
-#[derive(Default)]
 pub struct Outputs {
     surfaces: Vec<OutputDock>,
-    /// Current fallback surface; `SurfaceId::MAIN` until replaced.
+    /// `SurfaceId::MAIN` until real outputs replace it (mirrors ashell-ru).
     fallback: Option<SurfaceId>,
     /// At most one window-list popup at a time.
     window_popup: Option<(SurfaceId, Option<OutputId>)>,
@@ -36,6 +35,20 @@ pub struct Outputs {
     /// (surfaces may appear after `sync_fit_size` ran, so caching alone would
     /// leave them at the default size until the next resize).
     fit_size: Option<(u32, u32)>,
+}
+
+impl Default for Outputs {
+    fn default() -> Self {
+        Self {
+            surfaces: Vec::new(),
+            // Track the initial `.layer_shell()` surface as the fallback dock:
+            // it must render content from the first frame and be replaced
+            // (destroyed) when the first real output appears.
+            fallback: Some(SurfaceId::MAIN),
+            window_popup: None,
+            fit_size: None,
+        }
+    }
 }
 
 /// Which surface a given `SurfaceId` refers to.
@@ -270,7 +283,7 @@ fn dock_anchor(position: Position, alignment: Alignment, stretch: bool) -> Ancho
 pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerShellSettings {
     use_theme(|appearance| {
         let horizontal = config.position.is_horizontal();
-        let thickness = appearance.dock_size;
+        let thickness = dock_thickness(appearance);
         let stretch = appearance.width == WidthMode::Full;
 
         // Stage 1 stub: `Fit` docks get a placeholder square until real
@@ -280,13 +293,6 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             (true, false) => (thickness * 4, thickness),
             (false, true) => (thickness, 0),
             (false, false) => (thickness, thickness * 4),
-        };
-
-        // Room for the hover-scale icon to overflow past the dock edge.
-        let headroom = if horizontal {
-            (((appearance.hover_scale - 1.0).max(0.0)) * appearance.icon_size as f32) as u32
-        } else {
-            0
         };
 
         let m = appearance.margin;
@@ -321,7 +327,7 @@ pub fn dock_layer_settings(config: &Config, output: Option<OutputId>) -> LayerSh
             // Fixed sits in its own reserved strip below windows.
             layer,
             exclusive_zone,
-            size: Some((w, h + headroom)),
+            size: Some((w, h)),
             margin,
             keyboard_interactivity: KeyboardInteractivity::None,
             output,
@@ -404,35 +410,55 @@ pub fn window_list_settings(
     })
 }
 
-/// Content-derived dock size for `Fit` mode.
-///
-/// Hover scale expands the icon visually (slight overlap); the layout slot
-/// stays one icon wide so the dock is compact.
+/// Reserved (footprint) dimensions of one dock button. The same numbers are
+/// used by `App::app_button`, so the surface size and the widget layout can
+/// never diverge: slot_w = icon_size * max(hover_scale, 1), slot_h adds the
+/// running-dots zone.
+pub fn slot_metrics(appearance: &crate::config::AppearanceConfig) -> (f32, f32) {
+    let icon = appearance.icon_size as f32;
+    let scale = appearance.hover_scale.max(1.0);
+    let dots = if appearance.show_running_indicator {
+        appearance.running_indicator_size + 3.0
+    } else {
+        0.0
+    };
+    let slot_w = icon * scale;
+    (slot_w, slot_w + dots)
+}
+
+/// Cross-axis size of the dock surface: at least the full button footprint,
+/// so dots and the hover-scaled icon are never clipped by the surface bounds.
+pub fn dock_thickness(appearance: &crate::config::AppearanceConfig) -> u32 {
+    let (_, slot_h) = slot_metrics(appearance);
+    (appearance.dock_size as f32).max(slot_h).round() as u32
+}
+
+/// Content-derived dock size for `Fit` mode. `groups` counts application
+/// groups only; the launcher button (when enabled) is accounted here exactly once.
 pub fn fit_content_size(
     config: &Config,
     appearance: &crate::config::AppearanceConfig,
-    children: usize,
+    groups: usize,
 ) -> (u32, u32) {
     let horizontal = config.position.is_horizontal();
-    let thickness = appearance.dock_size;
-    let headroom = if horizontal {
-        ((appearance.hover_scale - 1.0).max(0.0) * appearance.icon_size as f32) as u32
+    let thickness = dock_thickness(appearance);
+    let (slot_w, _) = slot_metrics(appearance);
+
+    let launcher_w = if config.launcher.enabled {
+        appearance.icon_size as f32
     } else {
-        0
+        0.0
     };
-
-    let radius_pad = appearance.border_radius as u32 * 2;
-    let slot = appearance.icon_size + 8;
-    let spacing = appearance.spacing as u32;
-    let n = children.max(1) as u32;
-
-    let launcher = u32::from(config.launcher.enabled);
-    let items = n + launcher;
-    let row = radius_pad + items * slot + items.saturating_sub(1) * spacing;
+    let items = groups as f32 + f32::from(config.launcher.enabled);
+    let content = 2.0 * appearance.border_radius
+        + launcher_w
+        + groups as f32 * slot_w
+        + (items.max(1.0) - 1.0) * appearance.spacing;
+    let content = (content.round() as u32).max(thickness);
 
     if horizontal {
-        (row, thickness + headroom)
+        (content, thickness)
     } else {
-        (thickness, row + headroom)
+        (thickness, content)
     }
 }

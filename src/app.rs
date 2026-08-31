@@ -434,8 +434,8 @@ impl App {
         if self.config.appearance.width != config::WidthMode::Fit {
             return Task::none();
         }
-        let children = self.groups().len() + usize::from(self.config.launcher.enabled);
-        let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, children));
+        let groups = self.groups().len();
+        let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, groups));
         if Some(size) == self.applied_fit_size {
             return Task::none();
         }
@@ -668,12 +668,33 @@ impl App {
             config::WidthMode::Full => 0.0,
         };
 
+        // Align the icon row to the screen edge so overflow (hover growth)
+        // expands AWAY from the screen and dots sit on the dock's edge.
+        let (align_x, align_y) = match self.config.position {
+            config::Position::Top => (
+                iced::alignment::Horizontal::Center,
+                iced::alignment::Vertical::Top,
+            ),
+            config::Position::Bottom => (
+                iced::alignment::Horizontal::Center,
+                iced::alignment::Vertical::Bottom,
+            ),
+            config::Position::Left => (
+                iced::alignment::Horizontal::Left,
+                iced::alignment::Vertical::Center,
+            ),
+            config::Position::Right => (
+                iced::alignment::Horizontal::Right,
+                iced::alignment::Vertical::Center,
+            ),
+        };
+
         let dock: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(appearance.dock_size as f32))
             .padding([0.0, fit_padding])
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Center)
+            .align_x(align_x)
+            .align_y(align_y)
             .style(move |theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(color_from_hex(
                     appearance.background_color,
