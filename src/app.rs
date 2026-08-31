@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use iced::{
     Element, Length, OutputEvent, Subscription, SurfaceId, Task, output_events, set_input_region,
-    widget::{button, column, container, image, mouse_area, row, text},
+    widget::{button, column, container, image, mouse_area, row, scrollable, text},
 };
 use log::{debug, info, warn};
 
@@ -54,6 +54,8 @@ pub struct App {
     dock_rect: Arc<Mutex<Option<Rect>>>,
     /// Primary output logical size (for geometry approximation).
     screen_size: Option<(i32, i32)>,
+    /// Icon strip is wider than the screen: launcher is pinned, icons scroll.
+    icons_overflow: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,8 @@ pub enum Message {
     DockEntered,
     DockLeftOrDragOut,
     AutoHideElapsed(u64),
+    /// Wheel-driven horizontal scroll of the icon strip (px delta).
+    IconScrollBy(f32),
     Ipc(IpcCommand),
     None,
 }
@@ -134,6 +138,7 @@ impl App {
             forced_visible: false,
             dock_rect,
             screen_size: None,
+            icons_overflow: false,
         }
     }
 
@@ -163,7 +168,10 @@ impl App {
                     .outputs
                     .remove(&self.config, output_id)
                     .map(|_| Message::None),
-                OutputEvent::InfoChanged(_) => Task::none(),
+                OutputEvent::InfoChanged(info) => {
+                    self.screen_size = info.logical_size;
+                    self.refresh()
+                }
             },
             Message::WindowsReady(windows) => {
                 self.windows = windows;
@@ -329,6 +337,7 @@ impl App {
                 }
                 self.apply_input_regions()
             }
+            Message::IconScrollBy(dx) => scroll_icons(dx),
             Message::Ipc(cmd) => match cmd {
                 IpcCommand::ForceVisible(v) => {
                     self.forced_visible = v;
@@ -430,19 +439,41 @@ impl App {
         regions.chain(size_sync)
     }
 
+    /// Caps the computed size at the output's main-axis size (minus margins)
+    /// and records whether the icon strip overflows the screen.
+    fn cap_to_screen(&mut self, mut size: (u32, u32)) -> (u32, u32) {
+        let Some((sw, sh)) = self.screen_size else {
+            self.icons_overflow = false;
+            return size;
+        };
+        let margin = self.config.appearance.margin.unsigned_abs() * 2;
+        if self.config.position.is_horizontal() {
+            let max_w = (sw as u32).saturating_sub(margin);
+            self.icons_overflow = size.0 > max_w;
+            size.0 = size.0.min(max_w);
+        } else {
+            let max_h = (sh as u32).saturating_sub(margin);
+            self.icons_overflow = size.1 > max_h;
+            size.1 = size.1.min(max_h);
+        }
+        size
+    }
+
     fn sync_fit_size(&mut self) -> Task<Message> {
         if self.config.appearance.width != config::WidthMode::Fit {
             return Task::none();
         }
         let groups = self.groups().len();
         let size = use_theme(|a| crate::outputs::fit_content_size(&self.config, a, groups));
-        if Some(size) == self.applied_fit_size {
-            return Task::none();
+        let size = self.cap_to_screen(size);
+
+        if Some(size) != self.applied_fit_size {
+            debug!("fit size -> {size:?} overflow={}", self.icons_overflow);
+            self.applied_fit_size = Some(size);
+            self.recompute_dock_rect();
+            return self.outputs.apply_fit_size(size).map(|_| Message::None);
         }
-        debug!("fit size -> {:?}", size);
-        self.applied_fit_size = Some(size);
-        self.recompute_dock_rect();
-        self.outputs.apply_fit_size(size).map(|_| Message::None)
+        Task::none()
     }
 
     /// Approximate the global dock rectangle from the primary output size,
@@ -624,7 +655,6 @@ impl App {
         let appearance = use_theme(|a| a.clone());
         let launcher = self.config.launcher.clone();
 
-        // --- Launcher button ---
         let launcher_button = launcher.enabled.then(|| {
             let text_color = color_from_hex(launcher.text_color, launcher.opacity);
             button(
@@ -644,22 +674,49 @@ impl App {
             .into()
         });
 
-        let (mut children, mut trailing): (Vec<Element<'_, Message>>, Vec<Element<'_, Message>>) =
-            (Vec::new(), Vec::new());
+        let icons_row: Element<'_, Message> = {
+            let mut kids: Vec<Element<'_, Message>> = Vec::new();
+            for group in self.groups() {
+                kids.push(self.app_button(&group, id));
+            }
+            row(kids).spacing(appearance.spacing).into()
+        };
 
+        // When the strip overflows the screen the launcher stays pinned
+        // outside the scrollable area and only the icons scroll.
+        let icons: Element<'_, Message> = if self.icons_overflow {
+            let scroll = scrollable(icons_row)
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::hidden(),
+                ))
+                .id(iced::widget::Id::new(DOCK_SCROLL_ID))
+                .width(Length::Fill);
+            container(mouse_area(scroll).on_scroll(|delta| match delta {
+                // Vertical wheel: the horizontal scrollable ignores it natively.
+                iced::mouse::ScrollDelta::Lines { x: 0.0, y } => Message::IconScrollBy(-y * 60.0),
+                iced::mouse::ScrollDelta::Pixels { x: 0.0, y } => Message::IconScrollBy(-y),
+                // Horizontal deltas are already handled by the scrollable.
+                _ => Message::None,
+            }))
+            .width(Length::Fill)
+            .into()
+        } else {
+            icons_row
+        };
+
+        let mut kids: Vec<Element<'_, Message>> = Vec::new();
         match launcher.position {
-            config::LauncherPosition::Start => children.extend(launcher_button),
-            config::LauncherPosition::End => trailing.extend(launcher_button),
+            config::LauncherPosition::Start => {
+                kids.extend(launcher_button);
+                kids.push(icons);
+            }
+            config::LauncherPosition::End => {
+                kids.push(icons);
+                kids.extend(launcher_button);
+            }
         }
 
-        // --- Application icons ---
-        for group in self.groups() {
-            children.push(self.app_button(&group, id));
-        }
-
-        children.extend(trailing);
-
-        let content: Element<'_, Message> = row(children).spacing(appearance.spacing).into();
+        let content: Element<'_, Message> = row(kids).spacing(appearance.spacing).into();
 
         // `Fit`: widen the dock past the first/last icon by the corner radius
         // so icons never sit inside the rounded-off corners.
@@ -1059,6 +1116,17 @@ impl App {
             }),
         ])
     }
+}
+
+const DOCK_SCROLL_ID: &str = "s-dock-icons";
+
+/// Scrolls the icon strip by `dx` px; the scrollable clamps at both ends.
+fn scroll_icons(dx: f32) -> Task<Message> {
+    let op = iced::core::widget::operation::scrollable::scroll_by(
+        iced::widget::Id::new(DOCK_SCROLL_ID),
+        iced::widget::scrollable::AbsoluteOffset { x: dx, y: 0.0 },
+    );
+    Task::from(iced_runtime::task::widget::<()>(op).map(|_| Message::None))
 }
 
 /// Chooses which window to focus inside an application group.

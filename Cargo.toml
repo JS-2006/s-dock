@@ -22,6 +22,7 @@ iced = { package = "iced_layershell", git = "https://github.com/MalpenZibo/iced_
   "svg",
   "canvas",
 ] }
+iced_runtime = "0.14"
 tokio = { version = "1", default-features = false, features = ["net", "rt", "rt-multi-thread", "process", "time", "io-util", "sync", "macros"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 toml = "0.9"
