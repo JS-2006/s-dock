@@ -199,6 +199,19 @@ Lua/Legacy probe + `send_and_check` / `eval_dispatch` / `legacy_dispatch`.
 - [ ] README.md (установка, конфиг), пример конфига в docs/, CHANGELOG.
       Коммит `docs: readme and example config`.
 
+## Этап 9. Метрики дока, cap по экрану, скролл иконок
+
+- [x] 9.1 Метрики кнопок = слот fit-расчёта (slot_w = icon_size*hover_scale),
+      thickness = max(dock_size, slot_h), headroom убран, лаунчер считается один раз.
+- [x] 9.2 MAIN-fallback зарегистрирован (view рисует док с первого кадра,
+      fallback уничтожается при первом выходе, input region управляется).
+- [x] 9.3 Cap fit-ширины экраном (screen_size из OutputEvent, InfoChanged обновляет).
+- [x] 9.4 Переполнение → scrollable иконок (колесо), лаунчер вне скролла.
+- [x] 9.5 Клавиатурный скролл (←/→) при OnDemand-фокусе дока.
+- [x] 9.6 Запрос окон перед отрисовкой (bootstrap fetch + gate windows_loaded +
+      fetch на reveal/Added/ConfigChanged).
+- [ ] 9.7 Визуальная проверка владельцем (старт, обрезки, колесо, стрелки, cap).
+
 ## Известные риски
 
 - Drag-out требует выхода указателя за пределы поверхности → решается расширением
