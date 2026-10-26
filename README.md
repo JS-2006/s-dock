@@ -3,9 +3,15 @@
 - изменение положения (верх, низ, справа, слева)
 - включить/отключить кнопку лаунчера
 - автоскрытие
--управление окнами
+- управление окнами
+- перетаскивание и закрепление иконок
+- отоблажение запущенных окон
+- 
 ## Скрииншоты
+
 <img width="1252" height="130" alt="image" src="https://github.com/user-attachments/assets/6ca81b8d-31df-4e20-be08-d388793b95c0" />
+<img width="1214" height="432" alt="image" src="https://github.com/user-attachments/assets/b34ff093-6703-4d31-b894-bbc36942ceb3" />
+
 ## Сборка
 ```
 git clone https://github.com/JS-2006/s-dock.git
@@ -14,6 +20,7 @@ cargo build --release
 ```
 ## Пример конфигурации
 ~/.config/s-dock/config.toml
+
 ```
 # Пример конфигурации s-dock
 # Положить в ~/.config/s-dock/config.toml
@@ -48,7 +55,7 @@ autohide_timeout = 1        # сек без курсора на доке до с
 [launcher]
 enabled = false
 label = "󱗼"                # эмодзи или текст
-cmd = "s-launcher toggle"                    # напр. "fuzzel"
+cmd = "s-launcher toggle"                    # напр. "s-launcher"
 position = "end"          # start | end — где кнопка в ряду дока (относительно приложений)
 text_color = "#2E3440"
 opacity =0.7               # прозрачность надписи кнопки, 0..1
